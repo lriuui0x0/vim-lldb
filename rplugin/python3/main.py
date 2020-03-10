@@ -5,17 +5,21 @@ import threading
 import msg
 
 class Debugger:
-    def __init__(self, pid, fd_in, fd_out):
+    def __init__(self, nvim, pid, fd_in, fd_out):
+        self.nvim = nvim
         self.pid = pid
         self.fd_in = fd_in
         self.fd_out = fd_out
         self.event_loop = threading.Thread(target=debugger_event_loop, args=(self,))
         self.event_loop.start()
 
-def debugger_event_loop(debugger):
-    pass
+def change_line(debugger):
+    debugger.nvim.call('TestFunc')
 
-def start():
+def debugger_event_loop(debugger):
+    debugger.nvim.async_call(change_line, debugger)
+
+def start(nvim):
     child_in, parent_out = os.pipe()
     parent_in, child_out = os.pipe()
     pid = os.fork()
@@ -31,7 +35,7 @@ def start():
         os.close(child_in)
         os.close(child_out)
 
-        debugger = Debugger(pid, parent_in, parent_out)
+        debugger = Debugger(nvim, pid, parent_in, parent_out)
         return debugger
 
 def launch(debugger, executable, working_dir, arguments):
@@ -40,8 +44,8 @@ def launch(debugger, executable, working_dir, arguments):
     os.write(debugger.fd_out, header_bytes)
     os.write(debugger.fd_out, event_bytes)
 
-    print(os.read(debugger.fd_in, 1000).decode())
+    # print(os.read(debugger.fd_in, 1000).decode())
 
-debugger = start()
-launch(debugger, 'abcd', '/root', [1, 2, 3])
+# debugger = start()
+# launch(debugger, 'abcd', '/root', [1, 2, 3])
 

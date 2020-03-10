@@ -18,5 +18,5 @@ class Handler(object):
 
     def lazy_start(self):
         if not self.started:
-            self.debugger = main.start()
+            self.debugger = main.start(self.nvim)
 

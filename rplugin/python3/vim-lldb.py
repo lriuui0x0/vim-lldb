@@ -15,6 +15,7 @@ class Handler(object):
     @pynvim.function('Launch')
     def launch(self, args):
         self.lazy_start()
+        main.launch(self.debugger, args[0], args[1], args[2], args[3])
 
     def lazy_start(self):
         if not self.started:

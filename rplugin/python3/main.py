@@ -10,14 +10,18 @@ class Debugger:
         self.pid = pid
         self.fd_in = fd_in
         self.fd_out = fd_out
-        self.event_loop = threading.Thread(target=debugger_event_loop, args=(self,))
+        self.event_loop = threading.Thread(target=response_loop, args=(self,))
         self.event_loop.start()
 
-def change_line(debugger):
-    debugger.nvim.call('TestFunc')
+def test_func(debugger, value):
+    debugger.nvim.current.line = value.replace('\n', '')
 
-def debugger_event_loop(debugger):
-    debugger.nvim.async_call(change_line, debugger)
+def response_loop(debugger):
+    while True:
+        value = os.read(debugger.fd_in, 1000).decode()
+        # header_length = msg.msg_unpack_int(os.read(debugger.fd_in, 8))
+        # event = msg.msg_unpack(os.read(debugger.))
+        debugger.nvim.async_call(test_func, debugger, value)
 
 def start(nvim):
     child_in, parent_out = os.pipe()
@@ -38,14 +42,9 @@ def start(nvim):
         debugger = Debugger(nvim, pid, parent_in, parent_out)
         return debugger
 
-def launch(debugger, executable, working_dir, arguments):
-    event_bytes = msg.msg_pack({'type': 'launch', 'executable': executable, 'working_dir': working_dir, 'arguments': arguments})
+def launch(debugger, executable, arguments, working_dir, environments):
+    event_bytes = msg.msg_pack({'type': 'launch', 'executable': executable, 'arguments': arguments, 'working_dir': working_dir, 'environments': environments})
     header_bytes = msg.msg_pack_int(len(event_bytes))
     os.write(debugger.fd_out, header_bytes)
     os.write(debugger.fd_out, event_bytes)
-
-    # print(os.read(debugger.fd_in, 1000).decode())
-
-# debugger = start()
-# launch(debugger, 'abcd', '/root', [1, 2, 3])
 

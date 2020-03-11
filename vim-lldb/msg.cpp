@@ -1,7 +1,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <cstdio>
 
 struct MsgObject;
 
@@ -58,39 +57,9 @@ MsgObject *msg_struct_data(MsgStruct *struct_data, char *string)
     return nullptr;
 }
 
-struct MsgBuffer
+void msg_pack_int(Array<char> *buffer, MsgInt int_data)
 {
-    char *data;
-    MsgInt capacity;
-    MsgInt length;
-};
-
-MsgBuffer msg_buffer_create()
-{
-    MsgBuffer buffer;
-    buffer.capacity = 4096;
-    buffer.length = 0;
-    buffer.data = (char *)malloc(sizeof(char) * buffer.capacity);
-    return buffer;
-}
-
-void msg_buffer_reserve(MsgBuffer *buffer, MsgInt length)
-{
-    if (buffer->length + length > buffer->capacity)
-    {
-        buffer->capacity *= 2;
-        buffer->data = (char *)realloc(buffer->data, sizeof(char) * buffer->capacity);
-    }
-}
-
-void msg_buffer_reset(MsgBuffer *buffer)
-{
-    buffer->length = 0;
-}
-
-void msg_pack_int(MsgBuffer *buffer, MsgInt int_data)
-{
-    msg_buffer_reserve(buffer, sizeof(MsgObjectType) + sizeof(MsgInt));
+    array_reserve(buffer, sizeof(MsgObjectType) + sizeof(MsgInt));
 
     *(MsgObjectType *)(buffer->data + buffer->length) = MsgObjectType::msg_int;
     buffer->length += sizeof(MsgObjectType);
@@ -99,9 +68,9 @@ void msg_pack_int(MsgBuffer *buffer, MsgInt int_data)
     buffer->length += sizeof(MsgInt);
 }
 
-void msg_pack_string(MsgBuffer *buffer, char *string_data, MsgInt string_length)
+void msg_pack_string(Array<char> *buffer, char *string_data, MsgInt string_length)
 {
-    msg_buffer_reserve(buffer, sizeof(MsgObjectType) + sizeof(MsgInt) + sizeof(char) * string_length);
+    array_reserve(buffer, sizeof(MsgObjectType) + sizeof(MsgInt) + sizeof(char) * string_length);
 
     *(MsgObjectType *)(buffer->data + buffer->length) = MsgObjectType::msg_string;
     buffer->length += sizeof(MsgObjectType);
@@ -113,9 +82,9 @@ void msg_pack_string(MsgBuffer *buffer, char *string_data, MsgInt string_length)
     buffer->length += sizeof(char) * string_length;
 }
 
-void msg_pack_array(MsgBuffer *buffer, MsgInt array_length)
+void msg_pack_array(Array<char> *buffer, MsgInt array_length)
 {
-    msg_buffer_reserve(buffer, sizeof(MsgObjectType) + sizeof(MsgInt));
+    array_reserve(buffer, sizeof(MsgObjectType) + sizeof(MsgInt));
 
     *(MsgObjectType *)(buffer->data + buffer->length) = MsgObjectType::msg_array;
     buffer->length += sizeof(MsgObjectType);
@@ -124,9 +93,9 @@ void msg_pack_array(MsgBuffer *buffer, MsgInt array_length)
     buffer->length += sizeof(MsgInt);
 }
 
-void msg_pack_struct(MsgBuffer *buffer, MsgInt struct_length)
+void msg_pack_struct(Array<char> *buffer, MsgInt struct_length)
 {
-    msg_buffer_reserve(buffer, sizeof(MsgObjectType) + sizeof(MsgInt));
+    array_reserve(buffer, sizeof(MsgObjectType) + sizeof(MsgInt));
 
     *(MsgObjectType *)(buffer->data + buffer->length) = MsgObjectType::msg_struct;
     buffer->length += sizeof(MsgObjectType);
@@ -135,9 +104,9 @@ void msg_pack_struct(MsgBuffer *buffer, MsgInt struct_length)
     buffer->length += sizeof(MsgInt);
 }
 
-void msg_pack_key(MsgBuffer *buffer, char *string_data, MsgInt string_length)
+void msg_pack_key(Array<char> *buffer, char *string_data, MsgInt string_length)
 {
-    msg_buffer_reserve(buffer, sizeof(MsgInt) + sizeof(char) * string_length);
+    array_reserve(buffer, sizeof(MsgInt) + sizeof(char) * string_length);
 
     *(MsgInt *)(buffer->data + buffer->length) = string_length;
     buffer->length += sizeof(MsgInt);

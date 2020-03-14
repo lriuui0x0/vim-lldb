@@ -18,6 +18,13 @@ Array<T> create_array(int capacity)
     return array;
 }
 
+
+template <typename T>
+void array_reset(Array<T> *array)
+{
+    array->length = 0;
+}
+
 template <typename T>
 void array_reserve(Array<T> *array, int length)
 {

@@ -1,8 +1,7 @@
 /*
 1) launch process (command line argument, environment variable, working directory)
 2) step over/in/out
-3) breakpoint toggle (line, function)
-4) watch variable, navigate struct, array
+3) breakpoint toggle (line, function) 4) watch variable, navigate struct, array
 */
 
 #include <cstdio>
@@ -18,10 +17,32 @@ using namespace lldb;
 void *response_loop(void * arg)
 {
     SBListener *listener = (SBListener *)arg;
-    SBEvent event;
-    for (int i = 0; i < 5; i++)
+    Array<char> msg_buffer = create_array<char>(4096);
+    while (true)
     {
-        printf("Hello");
+        SBEvent event;
+        SBStream event_stream;
+        if (listener->WaitForEvent(1, event))
+        {
+            event.GetDescription(event_stream);
+            char *data = (char *)event_stream.GetData();
+
+            array_reset(&msg_buffer);
+            msg_pack_struct(&msg_buffer, 1);
+
+            msg_pack_key(&msg_buffer, "event", strlen("event"));
+            msg_pack_string(&msg_buffer, data, strlen(data));
+
+            MsgInt msg_length = msg_buffer.length;
+            int byte_written = write(STDOUT_FILENO, &msg_length, sizeof(MsgInt));
+            if (byte_written == sizeof(MsgInt))
+            {
+                byte_written = write(STDOUT_FILENO, msg_buffer.data, msg_length);
+                if (byte_written == sizeof(msg_length))
+                {
+                }
+            }
+        }
     }
     return nullptr;
 }
@@ -36,17 +57,18 @@ int main()
     pthread_t response_thread;
     int ret = pthread_create(&response_thread, nullptr, response_loop, &listener);
 
+    char *msg_buffer = nullptr;
     while (true)
     {
         MsgInt msg_length = 0;
         int byte_read = read(STDIN_FILENO, &msg_length, sizeof(MsgInt));
         if (byte_read == sizeof(MsgInt))
         {
-            Array<char> msg_buffer = create_array<char>(4096);
-            array_reserve(&msg_buffer, msg_length);
-            byte_read = read(STDIN_FILENO, msg_buffer.data, msg_length); if (byte_read == msg_length)
+            msg_buffer = (char *)realloc(msg_buffer, msg_length);
+            byte_read = read(STDIN_FILENO, msg_buffer, msg_length);
+            if (byte_read == msg_length)
             {
-                MsgStruct *event = &msg_unpack(msg_buffer.data)->struct_data;
+                MsgStruct *event = &msg_unpack(msg_buffer)->struct_data;
                 MsgString *event_type = &msg_struct_data(event, "type")->string_data;
 
                 if (strcmp(event_type->data, "launch") == 0)
@@ -75,7 +97,6 @@ int main()
                     SBError error;
                     SBProcess process = target.Launch(listener, (const char **)arguments, (const char **)environments, 
                             nullptr, nullptr, nullptr, msg_working_dir->data, 0, false, error);
-                    break;
                 }
             }
             else

@@ -22,13 +22,9 @@ def msg_pack(obj):
             data.extend(msg_pack(x))
     elif type(obj) == dict:
         data.extend(msg_pack_int(len(obj)))
-        keys = bytearray()
-        values = bytearray()
         for k, v in obj.items():
-            keys.extend(msg_pack_str(k))
-            values.extend(msg_pack(v))
-        data.extend(keys)
-        data.extend(values)
+            data.extend(msg_pack_str(k))
+            data.extend(msg_pack(v))
 
     return bytes(data)
 
@@ -58,16 +54,11 @@ def msg_unpack(buf):
             obj.append(data)
     elif msg_type == dict:
         length, buf = msg_unpack_int(buf)
-        keys, values = [], []
+        obj = {}
         for _ in range(length):
             key, buf = msg_unpack_str(buf)
-            keys.append(key)
-        for _ in range(length):
             value, buf = msg_unpack(buf)
-            values.append(value)
-        obj = {}
-        for k, v in zip(keys, values):
-            obj[k] = v
+            obj[key] = value
 
     return obj, buf
 

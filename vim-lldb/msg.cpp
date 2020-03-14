@@ -171,9 +171,6 @@ char *msg_unpack(char *raw_data, MsgObject *object)
             for (MsgInt i = 0; i < object->struct_data.length; i++)
             {
                 raw_data = msg_unpack_string(raw_data, object->struct_data.keys + i);
-            }
-            for (MsgInt i = 0; i < object->struct_data.length; i++)
-            {
                 raw_data = msg_unpack(raw_data, object->struct_data.data + i);
             }
         }

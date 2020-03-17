@@ -168,7 +168,7 @@ int main()
                     SBError error;
                     SBListener invalid_listener;
                     context.process = context.target.Launch(invalid_listener, (const char **)arguments, (const char **)environments, 
-                            nullptr, nullptr, nullptr, msg_working_dir->data, 0, false, error);
+                            nullptr, nullptr, nullptr, msg_working_dir->data, 0, true, error);
                 }
                 else if (strcmp(event_type->data, "step_over") == 0)
                 {
@@ -186,6 +186,14 @@ int main()
                     SBThread thread = context.process.GetThreadAtIndex(0);
                     SBError error;
                     thread.StepOut(error);
+                }
+                else if (strcmp(event_type->data, "resume") == 0)
+                {
+                    SBError error = context.process.Continue();
+                }
+                else if (strcmp(event_type->data, "stop") == 0)
+                {
+                    SBError error = context.process.Stop();
                 }
                 else if (strcmp(event_type->data, "kill") == 0)
                 {

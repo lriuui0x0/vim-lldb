@@ -79,6 +79,14 @@ def step_out(debugger):
     event = {'type': 'step_out'}
     send_event(debugger, event)
 
+def resume(debugger):
+    event = {'type': 'resume'}
+    send_event(debugger, event)
+
+def stop(debugger):
+    event = {'type': 'stop'}
+    send_event(debugger, event)
+
 def kill(debugger):
     event = {'type': 'kill'}
     send_event(debugger, event)

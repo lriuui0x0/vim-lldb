@@ -33,6 +33,16 @@ class Handler(object):
         if self.started:
             main.step_out(self.debugger)
 
+    @pynvim.function('Resume')
+    def resume(self, args):
+        if self.started:
+            main.resume(self.debugger)
+
+    @pynvim.function('Stop')
+    def stop(self, args):
+        if self.started:
+            main.stop(self.debugger)
+
     @pynvim.function('Kill')
     def kill(self, args):
         if self.started:

@@ -4,6 +4,7 @@ sys.path.append(path.dirname(__file__))
 
 import os
 import threading
+from enum import Enum
 import msg
 
 class Debugger:
@@ -24,13 +25,19 @@ class Debugger:
 
 def response_loop(debugger):
     while True:
-        debugger.async_log('response loop')
-        header_length, _ = msg.msg_unpack_int(os.read(debugger.fd_in, 8))
+        msg_bytes = os.read(debugger.fd_in, 8)
+        if len(msg_bytes) < 8:
+            break
+        header_length, _ = msg.msg_unpack_int(msg_bytes)
         debugger.async_log(f'response loop, header_length = {header_length}')
-        event, _ = msg.msg_unpack(os.read(debugger.fd_in, header_length))
+
+        msg_bytes = os.read(debugger.fd_in, header_length)
+        if len(msg_bytes) < header_length:
+            break
+        event, _ = msg.msg_unpack(msg_bytes)
         debugger.async_log(f'response loop, event = {event}')
 
-def start(nvim):
+def startup(nvim):
     child_in, parent_out = os.pipe()
     parent_in, child_out = os.pipe()
     pid = os.fork()
@@ -49,11 +56,30 @@ def start(nvim):
         debugger = Debugger(nvim, pid, parent_in, parent_out)
         return debugger
 
-def launch(debugger, executable, arguments, working_dir, environments):
-    event = {'type': 'launch', 'executable': executable, 'arguments': arguments, 'working_dir': working_dir, 'environments': environments}
-    debugger.log(event)
+def send_event(debugger, event):
     event_bytes = msg.msg_pack(event)
     header_bytes = msg.msg_pack_int(len(event_bytes))
     os.write(debugger.fd_out, header_bytes)
     os.write(debugger.fd_out, event_bytes)
+
+
+def launch(debugger, executable, arguments, working_dir, environments):
+    event = {'type': 'launch', 'executable': executable, 'arguments': arguments, 'working_dir': working_dir, 'environments': environments}
+    send_event(debugger, event)
+
+def step_over(debugger):
+    event = {'type': 'step_over'}
+    send_event(debugger, event)
+
+def step_into(debugger):
+    event = {'type': 'step_into'}
+    send_event(debugger, event)
+
+def step_out(debugger):
+    event = {'type': 'step_out'}
+    send_event(debugger, event)
+
+def kill(debugger):
+    event = {'type': 'kill'}
+    send_event(debugger, event)
 

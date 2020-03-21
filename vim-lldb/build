@@ -1,9 +1,0 @@
-#!/usr/bin/fish
-
-echo 'Building ...'
-
-mkdir -p bin
-clang++ -Wno-writable-strings \
-    -I/usr/local/include/lldb/API -g -O0 -o bin/vim-lldb vim-lldb/main.cpp \
-    -L/usr/local/lib -llldb -lpthread
-

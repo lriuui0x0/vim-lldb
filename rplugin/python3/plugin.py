@@ -3,7 +3,7 @@ from os import path
 sys.path.append(path.dirname(__file__))
 
 import pynvim
-import main
+from debugger import Debugger
 
 @pynvim.plugin
 class Handler(object):
@@ -15,7 +15,9 @@ class Handler(object):
     @pynvim.function('Launch')
     def launch(self, args):
         if not self.started:
-            self.startup()
+            self.debugger = Debugger(self.nvim)
+            self.started = True
+
         main.launch(self.debugger, args[0], args[1], args[2], args[3])
 
     @pynvim.function('StepOver')
@@ -47,8 +49,4 @@ class Handler(object):
     def kill(self, args):
         if self.started:
             main.kill(self.debugger)
-
-    def startup(self):
-        self.debugger = main.startup(self.nvim)
-        self.started = True
 

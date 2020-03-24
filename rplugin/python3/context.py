@@ -15,13 +15,13 @@ import lldb
 # 8. function.IsValid() always return false
 
 # TODO
-# 1. Buffer automatically sync with signs?
-# 2. Workaround airline?
+# Buffer automatically sync with signs?
+# Workaround airline?
 
 def log(nvim, value):
     nvim.command(f'echomsg {repr(value)}')
 
-def error(nvim, value):
+def logerr(nvim, value):
     nvim.command(f'echoerr {repr(value)}')
 
 def command(nvim, cmd):
@@ -116,7 +116,7 @@ class Context:
             update_window(self.nvim, 'stack', process_info)
         else:
             # TODO: Error reporting
-            error(self.nvim, error.GetCString())
+            logerr(self.nvim, error.GetCString())
 
 
     def step_over(self):
@@ -126,7 +126,7 @@ class Context:
         thread.StepOver(lldb.eOnlyDuringStepping, error)
         if error.Fail():
             # TODO: Error reporting
-            error(self.nvim, error.GetCString())
+            logerr(self.nvim, error.GetCString())
 
     def step_into(self):
         process = self.target.GetProcess()
@@ -165,7 +165,6 @@ class Context:
 
     def toggle_breakpoint(self):
         file = os.path.abspath(call(self.nvim, 'bufname'))
-        buffer = call(self.nvim, 'bufnr')
         line = call(self.nvim, 'line', '.')
 
         curr_bp = None
@@ -176,35 +175,40 @@ class Context:
 
         if curr_bp:
             self.bp_list.remove(curr_bp)
-            call(self.nvim, 'sign_unplace', 'vim_lldb_sign_breakpoint', { 'id': curr_bp['sign_id'] })
         else:
             bp = { 'sign_id': self.get_sign_id(), 'file': file, 'line': line }
             self.bp_list.append(bp)
-            call(self.nvim, 'sign_place', bp['sign_id'], 'vim_lldb_sign_breakpoint', 'vim_lldb_sign_breakpoint', buffer, { 'lnum': bp['line'], 'priority': 1000 })
 
-    def upsert_cursor(self, thread, file, line):
-        curr_cursor = None
-        for cursor in self.cursor_list:
-            if cursor['thread'] == thread:
-                curr_cursor = cursor
+        self.sync_sign('vim_lldb_sign_breakpoint', self.bp_list)
 
-        if curr_cursor:
-            if curr_cursor['file'] != file or curr_cursor['line'] != line:
-                call(self.nvim, 'sign_unplace', 'vim_lldb_sign_cursor', { 'id': curr_cursor['sign_id'] })
-                self.cursor_list.remove(curr_cursor)
-            else:
-                return
 
-        cursor = { 'sign_id': self.get_sign_id(), 'file': file, 'line': line }
-        self.cursor_list.append(cursor)
-        call(self.nvim, 'sign_place', cursor['sign_id'], 'vim_lldb_sign_cursor', 'vim_lldb_sign_cursor', buffer, { 'lnum': cursor['line'], 'priority': 2000 })
+    def sync_sign(self, sign_type, sign_list):
+        def get_file(buffer):
+            return os.path.abspath(call(self.nvim, 'bufname', buffer))
 
-    def remove_cursor(self, thread):
-        for cursor in self.cursor_list:
-            if cursor['thread'] == thread:
-                call(self.nvim, 'sign_unplace', 'vim_lldb_sign_cursor', { 'id': cursor['sign_id'] })
-                self.cursor_list.remove(cursor)
-                break
+        buffer_count = call(self.nvim, 'bufnr')
+        for buffer in range(1, buffer_count + 1):
+            buffer_curr_sign_list = call(self.nvim, 'sign_getplaced', buffer, { 'group': sign_type })[0]['signs']
+            buffer_sign_list = [sign for sign in sign_list if sign['file'] == get_file(buffer)]
+
+            for buffer_curr_sign in buffer_curr_sign_list:
+                found = False
+                for buffer_sign in buffer_sign_list:
+                    if buffer_curr_sign['lnum'] == buffer_sign['line']:
+                        found = True
+                        break
+                if not found:
+                    call(self.nvim, 'sign_unplace', sign_type, { 'buffer': buffer, 'id': buffer_curr_sign['id'] })
+
+            for buffer_sign in buffer_sign_list:
+                found = False
+                for buffer_curr_sign in buffer_curr_sign_list:
+                    if buffer_sign['line'] == buffer_curr_sign['lnum']:
+                        found = True
+                        break
+                if not found:
+                    call(self.nvim, 'sign_place', self.get_sign_id(), sign_type, sign_type, buffer, { 'lnum': buffer_sign['line'] })
+
 
 def event_loop(context):
     def process_state_str(state):
@@ -244,7 +248,7 @@ def event_loop(context):
                         elif state == lldb.eStateExited:
                             pass
     except Exception as e:
-        context.nvim.async_call(error, context.nvim, e.message)
+        context.nvim.async_call(logerr, context.nvim, e.message)
 
 def get_process_info(process):
     process_info = {}

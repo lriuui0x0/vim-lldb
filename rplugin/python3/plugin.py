@@ -53,6 +53,11 @@ class Handler(object):
         self.lazy_start()
         self.context.toggle_breakpoint()
 
+    @pynvim.autocmd('BufEnter')
+    def terminate(self):
+        self.lazy_start()
+        self.context.sync_all_sign()
+
     @pynvim.autocmd('VimLeavePre')
     def terminate(self):
         if self.started:

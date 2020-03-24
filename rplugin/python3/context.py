@@ -209,6 +209,10 @@ class Context:
                 if not found:
                     call(self.nvim, 'sign_place', self.get_sign_id(), sign_type, sign_type, buffer, { 'lnum': buffer_sign['line'] })
 
+    def sync_all_sign(self):
+        self.sync_sign('vim_lldb_sign_breakpoint', self.bp_list)
+        self.sync_sign('vim_lldb_sign_cursor', self.cursor_list)
+
 
 def event_loop(context):
     def process_state_str(state):

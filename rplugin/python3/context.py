@@ -159,10 +159,6 @@ class Context:
             # TODO: Error reporting
             pass
 
-    def get_sign_id(self):
-        self.sign_id += 1
-        return self.sign_id
-
     def toggle_breakpoint(self):
         file = os.path.abspath(call(self.nvim, 'bufname'))
         line = call(self.nvim, 'line', '.')
@@ -176,7 +172,7 @@ class Context:
         if curr_bp:
             self.bp_list.remove(curr_bp)
         else:
-            bp = { 'sign_id': self.get_sign_id(), 'file': file, 'line': line }
+            bp = { 'file': file, 'line': line }
             self.bp_list.append(bp)
 
         self.sync_sign('vim_lldb_sign_breakpoint', self.bp_list)
@@ -207,7 +203,8 @@ class Context:
                         found = True
                         break
                 if not found:
-                    call(self.nvim, 'sign_place', self.get_sign_id(), sign_type, sign_type, buffer, { 'lnum': buffer_sign['line'] })
+                    self.sign_id += 1
+                    call(self.nvim, 'sign_place', self.sign_id, sign_type, sign_type, buffer, { 'lnum': buffer_sign['line'] })
 
     def sync_all_sign(self):
         self.sync_sign('vim_lldb_sign_breakpoint', self.bp_list)

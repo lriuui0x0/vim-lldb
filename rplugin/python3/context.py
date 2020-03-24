@@ -1,9 +1,7 @@
-# -*- coding: utf-8 -*-
 import os
 import threading
 from contextlib import contextmanager
 import lldb
-import random
 
 # TODO
 # Ask Greg:
@@ -17,19 +15,14 @@ import random
 # 8. function.IsValid() always return false
 
 # TODO
-# Fix Python 2:
-# 1. string interpolation
-# 2. semaphore timeout and non-blocking event listening
-# 3. unicode encoding
-
-# TODO
-# 1. Workaround airline?
+# 1. Buffer automatically sync with signs?
+# 2. Workaround airline?
 
 def log(nvim, value):
-    nvim.command('echomsg ' + repr(value))
+    nvim.command(f'echomsg {repr(value)}')
 
 def error(nvim, value):
-    nvim.command('echoerr ' + repr(value))
+    nvim.command(f'echoerr {repr(value)}')
 
 def command(nvim, cmd):
     nvim.command(cmd)
@@ -67,7 +60,7 @@ def create_window(nvim, name):
         call(nvim, 'setwinvar', window, '&ruler', 0)
         call(nvim, 'setwinvar', window, '&wrap', 0)
 
-        command(nvim, 'file vim-lldb(' + name + ')')
+        command(nvim, f'file vim-lldb({name})')
         call(nvim, 'setwinvar', window, 'vim_lldb', name)
 
         command(nvim, 'wincmd p')
@@ -89,25 +82,31 @@ def update_window(nvim, name, data):
 class Context:
     def __init__(self, nvim):
         self.nvim = nvim
+        command(self.nvim, 'highlight vim_lldb_highlight_breakpoint guifg=red')
+        call(self.nvim, 'sign_define', 'vim_lldb_sign_breakpoint', { 'text': '●', 'texthl': 'vim_lldb_highlight_breakpoint' })
+        command(self.nvim, 'highlight vim_lldb_highlight_cursor guifg=yellow')
+        call(self.nvim, 'sign_define', 'vim_lldb_sign_cursor', { 'text': '➨', 'texthl': 'vim_lldb_highlight_cursor' })
 
         self.debugger = lldb.SBDebugger.Create()
         self.debugger.SetAsync(True)
         self.target = None
+
         self.sign_id = 0
         self.bp_list = []
+        self.cursor_list = []
 
         self.event_loop_exit = threading.Semaphore(value = 0)
         self.event_loop = threading.Thread(target=event_loop, args=(self,))
         self.event_loop.start()
 
     def launch(self, executable, arguments, working_dir, environments):
-        self.target = self.debugger.CreateTargetWithFileAndTargetTriple(executable.encode(), 'x86_64-unknown-linux-gnu'.encode())
+        self.target = self.debugger.CreateTargetWithFileAndTargetTriple(executable, 'x86_64-unknown-linux-gnu')
 
         launch_info = lldb.SBLaunchInfo([])
-        launch_info.SetExecutableFile(lldb.SBFileSpec(executable.encode()), True)
+        launch_info.SetExecutableFile(lldb.SBFileSpec(executable), True)
         launch_info.SetArguments(arguments, True)
         launch_info.SetEnvironmentEntries(environments, True)
-        launch_info.SetWorkingDirectory(working_dir.encode())
+        launch_info.SetWorkingDirectory(working_dir)
         launch_info.SetLaunchFlags(lldb.eLaunchFlagStopAtEntry)
         error = lldb.SBError()
         process = self.target.Launch(launch_info, error)
@@ -160,10 +159,13 @@ class Context:
             # TODO: Error reporting
             pass
 
-    def toggle_breakpoint(self):
-        call(self.nvim, 'sign_define', 'vim_lldb_sign_breakpoint', { 'text': '●' })
+    def get_sign_id(self):
+        self.sign_id += 1
+        return self.sign_id
 
+    def toggle_breakpoint(self):
         file = os.path.abspath(call(self.nvim, 'bufname'))
+        buffer = call(self.nvim, 'bufnr')
         line = call(self.nvim, 'line', '.')
 
         curr_bp = None
@@ -174,19 +176,35 @@ class Context:
 
         if curr_bp:
             self.bp_list.remove(curr_bp)
-            call(self.nvim, 'sign_unplace', '', { 'id': curr_bp['sign_id'] })
+            call(self.nvim, 'sign_unplace', 'vim_lldb_sign_breakpoint', { 'id': curr_bp['sign_id'] })
         else:
-            bp = { 'sign_id': self.sign_id, 'file': file, 'line': line }
+            bp = { 'sign_id': self.get_sign_id(), 'file': file, 'line': line }
             self.bp_list.append(bp)
+            call(self.nvim, 'sign_place', bp['sign_id'], 'vim_lldb_sign_breakpoint', 'vim_lldb_sign_breakpoint', buffer, { 'lnum': bp['line'], 'priority': 1000 })
 
-            buffer_count = call(self.nvim, 'bufnr', '$')
-            for buffer in range(1, buffer_count + 1):
-                buffer_file = os.path.abspath(call(self.nvim, 'bufname', buffer))
-                if buffer_file == bp['file']:
-                    call(self.nvim, 'sign_place', bp['sign_id'], '', 'vim_lldb_sign_breakpoint', buffer, { 'lnum': bp['line'], 'priority': 1000 })
-                    break
-            self.sign_id += 1
+    def upsert_cursor(self, thread, file, line):
+        curr_cursor = None
+        for cursor in self.cursor_list:
+            if cursor['thread'] == thread:
+                curr_cursor = cursor
 
+        if curr_cursor:
+            if curr_cursor['file'] != file or curr_cursor['line'] != line:
+                call(self.nvim, 'sign_unplace', 'vim_lldb_sign_cursor', { 'id': curr_cursor['sign_id'] })
+                self.cursor_list.remove(curr_cursor)
+            else:
+                return
+
+        cursor = { 'sign_id': self.get_sign_id(), 'file': file, 'line': line }
+        self.cursor_list.append(cursor)
+        call(self.nvim, 'sign_place', cursor['sign_id'], 'vim_lldb_sign_cursor', 'vim_lldb_sign_cursor', buffer, { 'lnum': cursor['line'], 'priority': 2000 })
+
+    def remove_cursor(self, thread):
+        for cursor in self.cursor_list:
+            if cursor['thread'] == thread:
+                call(self.nvim, 'sign_unplace', 'vim_lldb_sign_cursor', { 'id': cursor['sign_id'] })
+                self.cursor_list.remove(cursor)
+                break
 
 def event_loop(context):
     def process_state_str(state):
@@ -208,10 +226,9 @@ def event_loop(context):
 
     try:
         listener = context.debugger.GetListener()
-        # while not context.event_loop_exit.acquire(timeout=1):
-        while True:
+        while not context.event_loop_exit.acquire(timeout=1):
             event = lldb.SBEvent()
-            if listener.GetNextEvent(event):
+            if listener.PeekAtNextEvent(event):
                 if lldb.SBProcess.EventIsProcessEvent(event):
                     event_type = event.GetType();
                     if event_type == lldb.SBProcess.eBroadcastBitStateChanged:

@@ -53,6 +53,11 @@ class Handler(object):
         self.lazy_start()
         self.context.toggle_breakpoint()
 
+    @pynvim.function('GotoFrame')
+    def goto_frame(self, args):
+        self.lazy_start()
+        self.context.goto_frame(args[0], args[1])
+
     @pynvim.autocmd('BufEnter')
     def terminate(self):
         self.lazy_start()
@@ -61,9 +66,9 @@ class Handler(object):
     @pynvim.autocmd('VimLeavePre')
     def terminate(self):
         if self.started:
+            lldb.SBDebugger.Terminate()
             self.context.event_loop_exit.release()
             self.context.event_loop.join()
-            lldb.SBDebugger.Terminate()
 
     def lazy_start(self):
         if not self.started:

@@ -5,17 +5,18 @@ import lldb
 
 # TODO
 # Ask Greg:
-# 1. resource management (e.g. SBTarget), error handling, Python C++ interface
-# 2. multiple processes per target?
-# 3. passing string (and other elements) through API
-# 4. guarantee only one thread may have stop reason?
-# 5. does GetThreadID change when some thread dies?
-# 6. module.GetFileSpec() vs module.GetPlatformFileSpec()?
-# 7. relationship between SBSymbol, SBModule, SBSymbolContext
-# 8. function.IsValid() always return false
+# resource management (e.g. SBTarget), error handling, Python C++ interface
+# multiple processes per target?
+# passing string (and other elements) through API
+# guarantee only one thread may have stop reason?
+# does GetThreadID change when some thread dies?
+# module.GetFileSpec() vs module.GetPlatformFileSpec()?
+# relationship between SBSymbol, SBModule, SBSymbolContext
+# differences between all the step functions
 
 # TODO
-# Buffer automatically sync with signs?
+# Vim long time exit
+# Unreliable continue stepping
 # Workaround airline?
 
 def log(nvim, value):
@@ -29,6 +30,9 @@ def command(nvim, cmd):
 
 def call(nvim, func, *args):
     return nvim.call(func, *args)
+
+def get_file(nvim, buffer):
+    return os.path.abspath(call(nvim, 'bufname', buffer))
 
 @contextmanager
 def writing(nvim, window):
@@ -63,6 +67,8 @@ def create_window(nvim, name):
         command(nvim, f'file vim-lldb({name})')
         call(nvim, 'setwinvar', window, 'vim_lldb', name)
 
+        command(nvim, 'nnoremap <buffer> <CR> :call GotoFrame(0, 0)<CR>')
+
         command(nvim, 'wincmd p')
 
 def update_window(nvim, name, data):
@@ -70,14 +76,54 @@ def update_window(nvim, name, data):
     if window:
         with writing(nvim, window):
             if name == 'stack':
-                process_info = data
                 buffer = call(nvim, 'winbufnr', window)
                 call(nvim, 'deletebufline', buffer, 1, '$')
                 line = 1
-                for thread_info in process_info['threads']:
+                for thread_info in data['threads']:
                     for frame_info in thread_info['frames']:
-                        call(nvim, 'setbufline', buffer, line, frame_info['module'])
+                        if frame_info['debuggable']:
+                            frame_line = f'{frame_info["function"]}  ({frame_info["file"]}:{frame_info["line"]})'
+                        else:
+                            frame_line = f'{frame_info["function"]}  ({frame_info["module"]})'
+                        call(nvim, 'setbufline', buffer, line, frame_line)
                         line += 1
+
+
+def goto_file(nvim, file, line, column):
+    window = 0
+    test_window = call(nvim, 'winnr')
+    if not call(nvim, 'getwinvar', test_window, 'vim_lldb'):
+        window = test_window
+    else:
+        test_window = call(nvim, 'winnr', '#')
+        if not call(nvim, 'getwinvar', test_window, 'vim_lldb'):
+            window = test_window
+        else:
+            window_count = call(nvim, 'winnr', '$')
+            for test_window in range(1, window_count + 1):
+                if not call(nvim, 'getwinvar', test_window, 'vim_lldb'):
+                    window = test_window
+                    break
+    if window:
+        command(nvim, f'{window} wincmd w')
+    else:
+        command(nvim, 'vnew')
+        window = call(nvim, 'winnr')
+
+    buffer = 0
+    buffer_count = call(nvim, 'bufnr')
+    for test_buffer in range(1, buffer_count + 1):
+        test_file = get_file(nvim, test_buffer)
+        if test_file == file:
+            buffer = test_buffer
+            break
+    if buffer:
+        command(nvim, f'buffer {buffer}')
+    else:
+        edit_file = os.path.relpath(file)
+        command(nvim, f'edit {edit_file}')
+
+    call(nvim, 'cursor', line, column)
 
 class Context:
     def __init__(self, nvim):
@@ -90,6 +136,7 @@ class Context:
         self.debugger = lldb.SBDebugger.Create()
         self.debugger.SetAsync(True)
         self.target = None
+        self.process_info = None
 
         self.sign_id = 0
         self.bp_list = []
@@ -111,9 +158,10 @@ class Context:
         error = lldb.SBError()
         process = self.target.Launch(launch_info, error)
         if error.Success():
-            process_info = get_process_info(process)
+            self.process_info = get_process_info(process)
+            log(self.nvim, self.process_info)
             create_window(self.nvim, 'stack')
-            update_window(self.nvim, 'stack', process_info)
+            update_window(self.nvim, 'stack', self.process_info)
         else:
             # TODO: Error reporting
             logerr(self.nvim, error.GetCString())
@@ -160,7 +208,7 @@ class Context:
             pass
 
     def toggle_breakpoint(self):
-        file = os.path.abspath(call(self.nvim, 'bufname'))
+        file = get_file(self.nvim, call(self.nvim, 'bufnr'))
         line = call(self.nvim, 'line', '.')
 
         curr_bp = None
@@ -179,13 +227,10 @@ class Context:
 
 
     def sync_sign(self, sign_type, sign_list):
-        def get_file(buffer):
-            return os.path.abspath(call(self.nvim, 'bufname', buffer))
-
         buffer_count = call(self.nvim, 'bufnr')
         for buffer in range(1, buffer_count + 1):
             buffer_curr_sign_list = call(self.nvim, 'sign_getplaced', buffer, { 'group': sign_type })[0]['signs']
-            buffer_sign_list = [sign for sign in sign_list if sign['file'] == get_file(buffer)]
+            buffer_sign_list = [sign for sign in sign_list if sign['file'] == get_file(self.nvim, buffer)]
 
             for buffer_curr_sign in buffer_curr_sign_list:
                 found = False
@@ -210,6 +255,13 @@ class Context:
         self.sync_sign('vim_lldb_sign_breakpoint', self.bp_list)
         self.sync_sign('vim_lldb_sign_cursor', self.cursor_list)
 
+    def goto_frame(self, thread, frame):
+        thread_info = self.process_info['threads'][0]
+        frame = frame or call(self.nvim, 'line', '.')
+        frame_info = thread_info['frames'][frame - 1]
+        if frame_info['debuggable']:
+            goto_file(self.nvim, frame_info['file'], frame_info['line'])
+
 
 def event_loop(context):
     def process_state_str(state):
@@ -231,19 +283,20 @@ def event_loop(context):
 
     try:
         listener = context.debugger.GetListener()
-        while not context.event_loop_exit.acquire(timeout=1):
+        while True:
             event = lldb.SBEvent()
-            if listener.PeekAtNextEvent(event):
+            if listener.WaitForEvent(1, event):
                 if lldb.SBProcess.EventIsProcessEvent(event):
                     event_type = event.GetType();
                     if event_type == lldb.SBProcess.eBroadcastBitStateChanged:
                         process = lldb.SBProcess.GetProcessFromEvent(event)
                         state = lldb.SBProcess.GetStateFromEvent(event)
-                        if state == lldb.eStateStopped:
-                            process_info = get_process_info(process)
+                        context.nvim.async_call(log, context.nvim, process_state_str(state))
 
-                            context.nvim.async_call(log, context.nvim, process_info)
-                            context.nvim.async_call(update_window, context.nvim, 'stack', process_info)
+                        if state == lldb.eStateStopped:
+                            context.process_info = get_process_info(process)
+                            context.nvim.async_call(log, context.nvim, context.process_info)
+                            context.nvim.async_call(update_window, context.nvim, 'stack', context.process_info)
                         elif state == lldb.eStateRunning:
                             pass
                         elif state == lldb.eStateExited:
@@ -266,13 +319,12 @@ def get_process_info(process):
             frame_info = {}
             thread_info['frames'].append(frame_info)
 
-            function = frame.GetFunction() 
-            frame_info['module'] = frame.GetModule().GetFileSpec().fullpath
-            frame_info['external'] = int(not function.IsValid())
-            if not frame_info['external']:
-                frame_info['function'] = frame.GetDisplayFunctionName()
+            frame_info['module'] = frame.GetModule().GetFileSpec().fullpath or ''
+            frame_info['function'] = frame.GetDisplayFunctionName() or ''
+            frame_info['debuggable'] = int(frame.GetFunction().IsValid())
+            if frame_info['debuggable']:
                 line_entry = frame.GetLineEntry()
-                frame_info['file'] = line_entry.GetFileSpec().fullpath
+                frame_info['file'] = line_entry.GetFileSpec().fullpath or ''
                 frame_info['line'] = line_entry.GetLine()
                 frame_info['column'] = line_entry.GetColumn()
 

@@ -15,65 +15,64 @@ class Handler(object):
 
     @pynvim.function('Launch')
     def launch(self, args):
-        self.lazy_start()
-        self.context.launch(args[0], args[1], args[2], args[3])
+        self.startup()
+        self.context.launch()
 
     @pynvim.function('StepOver')
     def step_over(self, args):
-        self.lazy_start()
+        self.startup()
         self.context.step_over()
 
     @pynvim.function('StepInto')
     def step_into(self, args):
-        self.lazy_start()
+        self.startup()
         self.context.step_into()
 
     @pynvim.function('StepOut')
     def step_out(self, args):
-        self.lazy_start()
+        self.startup()
         self.context.step_out()
 
     @pynvim.function('Resume')
     def resume(self, args):
-        self.lazy_start()
+        self.startup()
         self.context.resume()
 
     @pynvim.function('Stop')
     def stop(self, args):
-        self.lazy_start()
+        self.startup()
         self.context.stop()
 
     @pynvim.function('Kill')
     def kill(self, args):
-        self.lazy_start()
+        self.startup()
         self.context.kill()
 
     @pynvim.function('ToggleBreakpoint')
     def toggle_breakpoint(self, args):
-        self.lazy_start()
+        self.startup()
         self.context.toggle_breakpoint()
 
     @pynvim.function('GotoFrame')
     def goto_frame(self, args):
-        self.lazy_start()
+        self.startup()
         self.context.goto_frame(args[0], args[1])
 
     @pynvim.autocmd('BufEnter')
-    def terminate(self):
-        self.lazy_start()
+    def buffer_sync_sign(self):
+        self.startup()
         self.context.sync_all_sign()
 
     @pynvim.autocmd('VimLeavePre')
-    def terminate(self):
+    def shutdown(self):
         if self.started:
             lldb.SBDebugger.Terminate()
             self.context.event_loop_exit.release()
             self.context.event_loop.join()
 
-    def lazy_start(self):
+    def startup(self):
         if not self.started:
             lldb.SBDebugger.Initialize()
-            self.nvim.command('autocmd VimLeavePre * call Terminate()')
             self.context = Context(self.nvim)
             self.started = True
 

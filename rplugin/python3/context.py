@@ -4,8 +4,7 @@ from contextlib import contextmanager
 import lldb
 
 # TODO
-# Ask Greg:
-# resource management (e.g. SBTarget), error handling, Python C++ interface
+# Ask Greg: resource management (e.g. SBTarget), error handling (SBError vs IsValid), Python C++ interface
 # multiple processes per target?
 # passing string (and other elements) through API
 # guarantee only one thread may have stop reason?
@@ -18,6 +17,7 @@ import lldb
 # Vim long time exit
 # Unreliable continue stepping
 # Workaround airline?
+# Investigate wrong frame information, image lookup --verbose --address <pc>
 
 def log(nvim, value):
     nvim.command(f'echomsg {repr(value)}')
@@ -81,7 +81,7 @@ def update_window(nvim, name, data):
                 line = 1
                 for thread_info in data['threads']:
                     for frame_info in thread_info['frames']:
-                        if frame_info['debuggable']:
+                        if frame_info['type'] == 'full':
                             frame_line = f'{frame_info["function"]}  ({frame_info["file"]}:{frame_info["line"]})'
                         else:
                             frame_line = f'{frame_info["function"]}  ({frame_info["module"]})'
@@ -125,6 +125,7 @@ def goto_file(nvim, file, line, column):
 
     call(nvim, 'cursor', line, column)
 
+
 class Context:
     def __init__(self, nvim):
         self.nvim = nvim
@@ -135,8 +136,11 @@ class Context:
 
         self.debugger = lldb.SBDebugger.Create()
         self.debugger.SetAsync(True)
+
+        self.registered_targets = [{ 'executable': 'test/main',  'arguments': [], 'working_dir': '/', 'environments': [] }]
         self.target = None
         self.process_info = None
+        self.process_state = None
 
         self.sign_id = 0
         self.bp_list = []
@@ -146,22 +150,32 @@ class Context:
         self.event_loop = threading.Thread(target=event_loop, args=(self,))
         self.event_loop.start()
 
-    def launch(self, executable, arguments, working_dir, environments):
+    def create_target(self, index):
+        # TODO: Delete old target? Preserve breakpoint for the same executable
+        executable = self.registered_targets[index]['executable']
         self.target = self.debugger.CreateTargetWithFileAndTargetTriple(executable, 'x86_64-unknown-linux-gnu')
+
+    def launch(self):
+        if not self.target:
+            self.create_target(0)
+
+        executable = self.registered_targets[0]['executable']
+        arguments = self.registered_targets[0]['arguments']
+        working_dir = self.registered_targets[0]['working_dir']
+        environments = self.registered_targets[0]['environments']
 
         launch_info = lldb.SBLaunchInfo([])
         launch_info.SetExecutableFile(lldb.SBFileSpec(executable), True)
         launch_info.SetArguments(arguments, True)
         launch_info.SetEnvironmentEntries(environments, True)
         launch_info.SetWorkingDirectory(working_dir)
-        launch_info.SetLaunchFlags(lldb.eLaunchFlagStopAtEntry)
+        launch_info.SetLaunchFlags(0)
         error = lldb.SBError()
         process = self.target.Launch(launch_info, error)
         if error.Success():
             self.process_info = get_process_info(process)
-            log(self.nvim, self.process_info)
+            self.process_state = process_state_str(process.GetState())
             create_window(self.nvim, 'stack')
-            update_window(self.nvim, 'stack', self.process_info)
         else:
             # TODO: Error reporting
             logerr(self.nvim, error.GetCString())
@@ -208,6 +222,9 @@ class Context:
             pass
 
     def toggle_breakpoint(self):
+        if not self.target:
+            self.create_target(0)
+
         file = get_file(self.nvim, call(self.nvim, 'bufnr'))
         line = call(self.nvim, 'line', '.')
 
@@ -220,11 +237,15 @@ class Context:
         if curr_bp:
             self.bp_list.remove(curr_bp)
         else:
-            bp = { 'file': file, 'line': line }
-            self.bp_list.append(bp)
+            bp = self.target.BreakpointCreateByLocation(file, line)
+            if bp.IsValid():
+                self.bp_list.append({ 'file': file, 'line': line, 'id': bp.GetID() })
+                log(self.nvim, self.bp_list)
+            else:
+                # TODO: Error handling
+                logerr(self.nvim, 'Cannot create breakpoint')
 
         self.sync_sign('vim_lldb_sign_breakpoint', self.bp_list)
-
 
     def sync_sign(self, sign_type, sign_list):
         buffer_count = call(self.nvim, 'bufnr')
@@ -249,7 +270,9 @@ class Context:
                         break
                 if not found:
                     self.sign_id += 1
-                    call(self.nvim, 'sign_place', self.sign_id, sign_type, sign_type, buffer, { 'lnum': buffer_sign['line'] })
+                    priorities = { 'vim_lldb_sign_breakpoint': 1000, 'vim_lldb_sign_cursor': 2000 }
+                    call(self.nvim, 'sign_place', self.sign_id, sign_type, sign_type, buffer,
+                         { 'lnum': buffer_sign['line'], 'priority': priorities[sign_type]})
 
     def sync_all_sign(self):
         self.sync_sign('vim_lldb_sign_breakpoint', self.bp_list)
@@ -259,28 +282,18 @@ class Context:
         thread_info = self.process_info['threads'][0]
         frame = frame or call(self.nvim, 'line', '.')
         frame_info = thread_info['frames'][frame - 1]
-        if frame_info['debuggable']:
-            goto_file(self.nvim, frame_info['file'], frame_info['line'])
+        if frame_info['type'] == 'full':
+            goto_file(self.nvim, frame_info['file'], frame_info['line'], frame_info['column'])
+
+    def update_process_cursor(self):
+        self.cursor_list = []
+        for thread_info in self.process_info['threads']:
+            top_frame = thread_info['frames'][0]
+            self.cursor_list.append({ 'file': top_frame['file'], 'line': top_frame['line'], 'id': thread_info['id'] })
+        self.sync_sign('vim_lldb_sign_cursor', self.cursor_list)
 
 
 def event_loop(context):
-    def process_state_str(state):
-        dictionary = {
-            lldb.eStateInvalid: "invalid",
-            lldb.eStateUnloaded: "unloaded",
-            lldb.eStateConnected: "connected",
-            lldb.eStateAttaching: "attaching",
-            lldb.eStateLaunching: "launching",
-            lldb.eStateStopped: "stopped",
-            lldb.eStateRunning: "running",
-            lldb.eStateStepping: "stepping",
-            lldb.eStateCrashed: "crashed",
-            lldb.eStateDetached: "detached",
-            lldb.eStateExited: "exited",
-            lldb.eStateSuspended: "suspended",
-        }
-        return dictionary[state]
-
     try:
         listener = context.debugger.GetListener()
         while True:
@@ -291,18 +304,38 @@ def event_loop(context):
                     if event_type == lldb.SBProcess.eBroadcastBitStateChanged:
                         process = lldb.SBProcess.GetProcessFromEvent(event)
                         state = lldb.SBProcess.GetStateFromEvent(event)
-                        context.nvim.async_call(log, context.nvim, process_state_str(state))
+                        context.process_state = process_state_str(state)
+                        context.nvim.async_call(log, context.nvim, context.process_state)
 
                         if state == lldb.eStateStopped:
                             context.process_info = get_process_info(process)
                             context.nvim.async_call(log, context.nvim, context.process_info)
+
                             context.nvim.async_call(update_window, context.nvim, 'stack', context.process_info)
+                            context.nvim.async_call(Context.update_process_cursor, context)
                         elif state == lldb.eStateRunning:
                             pass
                         elif state == lldb.eStateExited:
                             pass
     except Exception as e:
         context.nvim.async_call(logerr, context.nvim, e.message)
+
+def process_state_str(state):
+    dictionary = {
+        lldb.eStateInvalid: 'invalid',
+        lldb.eStateUnloaded: 'unloaded',
+        lldb.eStateConnected: 'connected',
+        lldb.eStateAttaching: 'attaching',
+        lldb.eStateLaunching: 'launching',
+        lldb.eStateStopped: 'stopped',
+        lldb.eStateRunning: 'running',
+        lldb.eStateStepping: 'stepping',
+        lldb.eStateCrashed: 'crashed',
+        lldb.eStateDetached: 'detached',
+        lldb.eStateExited: 'exited',
+        lldb.eStateSuspended: 'suspended',
+    }
+    return dictionary[state]
 
 def get_process_info(process):
     process_info = {}
@@ -321,12 +354,14 @@ def get_process_info(process):
 
             frame_info['module'] = frame.GetModule().GetFileSpec().fullpath or ''
             frame_info['function'] = frame.GetDisplayFunctionName() or ''
-            frame_info['debuggable'] = int(frame.GetFunction().IsValid())
-            if frame_info['debuggable']:
+            frame_info['type'] = 'full' if frame.GetFunction().IsValid() else 'none'
+            if frame_info['type'] == 'full':
                 line_entry = frame.GetLineEntry()
                 frame_info['file'] = line_entry.GetFileSpec().fullpath or ''
                 frame_info['line'] = line_entry.GetLine()
                 frame_info['column'] = line_entry.GetColumn()
+                if not os.path.isfile(frame_info['file']):
+                    frame_info['type'] = 'partial'
 
         stop_reason = thread.GetStopReason() 
         if stop_reason != lldb.eStopReasonNone:

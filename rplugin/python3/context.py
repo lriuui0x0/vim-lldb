@@ -236,11 +236,13 @@ class Context:
 
         if curr_bp:
             self.bp_list.remove(curr_bp)
+            if not self.target.BreakpointDelete(curr_bp['id']):
+                # TODO: Error handling
+                logerr(self.nvim, 'Cannot delete breakpoint')
         else:
             bp = self.target.BreakpointCreateByLocation(file, line)
             if bp.IsValid():
                 self.bp_list.append({ 'file': file, 'line': line, 'id': bp.GetID() })
-                log(self.nvim, self.bp_list)
             else:
                 # TODO: Error handling
                 logerr(self.nvim, 'Cannot create breakpoint')

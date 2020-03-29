@@ -61,7 +61,7 @@ class Handler(object):
     @pynvim.autocmd('BufEnter')
     def buffer_sync_sign(self):
         self.startup()
-        self.context.sync_all_sign()
+        self.context.sync_signs()
 
     @pynvim.autocmd('VimLeavePre')
     def shutdown(self):

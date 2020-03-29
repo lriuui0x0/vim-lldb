@@ -1,5 +1,6 @@
 import os
 import threading
+import inspect
 from contextlib import contextmanager
 import lldb
 
@@ -19,120 +20,208 @@ import lldb
 # Workaround airline?
 # Investigate wrong frame information, image lookup --verbose --address <pc>
 
-def log(nvim, value):
-    nvim.command(f'echomsg {repr(value)}')
+class View:
+    VIM_LLDB_WINDOW_KEY = 'vim_lldb'
+    VIM_LLDB_SIGN_BREAKPOINT = 'vim_lldb_sign_breakpoint'
+    VIM_LLDB_SIGN_CURSOR = 'vim_lldb_sign_cursor'
 
-def logerr(nvim, value):
-    nvim.command(f'echoerr {repr(value)}')
+    def __init__(self, nvim, tid):
+        self.nvim = nvim
+        self.tid = tid
 
-def command(nvim, cmd):
-    nvim.command(cmd)
+        self.sign_id = 0
+        self.command(f'highlight {self.VIM_LLDB_SIGN_BREAKPOINT}_HIGHLIGHT guifg=red')
+        self.call('sign_define', self.VIM_LLDB_SIGN_BREAKPOINT, {'text': '●', 'texthl': f'{self.VIM_LLDB_SIGN_BREAKPOINT}_HIGHLIGHT'})
+        self.command(f'highlight {self.VIM_LLDB_SIGN_CURSOR}_HIGHLIGHT guifg=yellow')
+        self.call('sign_define', self.VIM_LLDB_SIGN_CURSOR, {'text': '➨', 'texthl': f'{self.VIM_LLDB_SIGN_CURSOR}_HIGHLIGHT'})
 
-def call(nvim, func, *args):
-    return nvim.call(func, *args)
-
-def get_file(nvim, buffer):
-    return os.path.abspath(call(nvim, 'bufname', buffer))
-
-@contextmanager
-def writing(nvim, window):
-    call(nvim, 'setwinvar', window, '&readonly', 0)
-    call(nvim, 'setwinvar', window, '&modifiable', 1)
-    yield
-    call(nvim, 'setwinvar', window, '&readonly', 1)
-    call(nvim, 'setwinvar', window, '&modifiable', 0)
-    call(nvim, 'setwinvar', window, '&modified', 0)
-
-def check_window_exists(nvim, name):
-    window_count = call(nvim, 'winnr', '$')
-    for window in range(1, window_count + 1):
-        window_name = call(nvim, 'getwinvar', window, 'vim_lldb')
-        if window_name == name:
-            return window
-    return 0
-
-def create_window(nvim, name):
-    if not check_window_exists(nvim, name):
-        command(nvim, 'vnew')
-
-        window = call(nvim, 'winnr')
-        call(nvim, 'setwinvar', window, '&readonly', 1)
-        call(nvim, 'setwinvar', window, '&modifiable', 0)
-        call(nvim, 'setwinvar', window, '&buftype', 'nofile')
-        call(nvim, 'setwinvar', window, '&buflisted', 0)
-        call(nvim, 'setwinvar', window, '&number', 0)
-        call(nvim, 'setwinvar', window, '&ruler', 0)
-        call(nvim, 'setwinvar', window, '&wrap', 0)
-
-        command(nvim, f'file vim-lldb({name})')
-        call(nvim, 'setwinvar', window, 'vim_lldb', name)
-
-        command(nvim, 'nnoremap <buffer> <CR> :call GotoFrame(0, 0)<CR>')
-
-        command(nvim, 'wincmd p')
-
-def update_window(nvim, name, data):
-    window = check_window_exists(nvim, name)
-    if window:
-        with writing(nvim, window):
-            if name == 'stack':
-                buffer = call(nvim, 'winbufnr', window)
-                call(nvim, 'deletebufline', buffer, 1, '$')
-                line = 1
-                for thread_info in data['threads']:
-                    for frame_info in thread_info['frames']:
-                        if frame_info['type'] == 'full':
-                            frame_line = f'{frame_info["function"]}  ({frame_info["file"]}:{frame_info["line"]})'
-                        else:
-                            frame_line = f'{frame_info["function"]}  ({frame_info["module"]})'
-                        call(nvim, 'setbufline', buffer, line, frame_line)
-                        line += 1
-
-
-def goto_file(nvim, file, line, column):
-    window = 0
-    test_window = call(nvim, 'winnr')
-    if not call(nvim, 'getwinvar', test_window, 'vim_lldb'):
-        window = test_window
-    else:
-        test_window = call(nvim, 'winnr', '#')
-        if not call(nvim, 'getwinvar', test_window, 'vim_lldb'):
-            window = test_window
+    def thread_guard(self):
+        if threading.current_thread().ident == self.tid:
+            return True
         else:
-            window_count = call(nvim, 'winnr', '$')
-            for test_window in range(1, window_count + 1):
-                if not call(nvim, 'getwinvar', test_window, 'vim_lldb'):
+            frame_info = inspect.stack()[1]
+            function = getattr(View, frame_info.function)
+            args_info = inspect.getargvalues(frame_info.frame)
+            args = list(map(args_info.locals.get, args_info.args))
+            context.nvim.async_call(function, *args)
+            return False
+
+
+    def command(self, cmd):
+        if self.thread_guard():
+            self.nvim.command(cmd)
+
+    def call(self, func, *args):
+        if self.thread_guard():
+            return self.nvim.call(func, *args)
+
+    def log_info(self, value):
+        if self.thread_guard():
+            self.command(f'echomsg {repr(value)}')
+
+    def log_error(self, value):
+        if self.thread_guard():
+            self.command(f'echoerr {repr(value)}')
+
+    def get_window(self):
+        if self.thread_guard():
+            return self.call('winnr')
+
+    def get_last_window(self):
+        if self.thread_guard():
+            return self.call('winnr', '#')
+
+    def get_window_count(self):
+        if self.thread_guard():
+            return self.call('winnr', '$')
+
+    def get_buffer(self):
+        if self.thread_guard():
+            return self.call('bufnr')
+
+    def get_buffer_count(self):
+        if self.thread_guard():
+            return self.call('bufnr', '$')
+
+    def get_line(self):
+        if self.thread_guard():
+            return self.call('line', '.')
+
+    def get_line_count(self):
+        if self.thread_guard():
+            return self.call('line', '$')
+
+    def get_buffer_file(self, buffer = 0):
+        if self.thread_guard():
+            buffer = buffer or self.get_buffer()
+            return os.path.abspath(self.call('bufname', buffer))
+
+    def sync_signs(self, sign_type, sign_list):
+        if self.thread_guard():
+            buffer_count = self.get_buffer_count()
+            for buffer in range(1, buffer_count + 1):
+                buffer_curr_sign_list = self.call('sign_getplaced', buffer, { 'group': sign_type })[0]['signs']
+                buffer_sign_list = [sign for sign in sign_list if sign['file'] == self.view.get_buffer_file(buffer)]
+
+                for buffer_curr_sign in buffer_curr_sign_list:
+                    found = False
+                    for buffer_sign in buffer_sign_list:
+                        if buffer_curr_sign['lnum'] == buffer_sign['line']:
+                            found = True
+                            break
+                    if not found:
+                        self.call('sign_unplace', sign_type, { 'buffer': buffer, 'id': buffer_curr_sign['id'] })
+
+                for buffer_sign in buffer_sign_list:
+                    found = False
+                    for buffer_curr_sign in buffer_curr_sign_list:
+                        if buffer_sign['line'] == buffer_curr_sign['lnum']:
+                            found = True
+                            break
+                    if not found:
+                        self.sign_id += 1
+                        priorities = {self.VIM_LLDB_SIGN_BREAKPOINT: 1000, self.VIM_LLDB_SIGN_CURSOR: 2000}
+                        self.call('sign_place', self.sign_id, sign_type, sign_type, buffer,
+                             { 'lnum': buffer_sign['line'], 'priority': priorities[sign_type]})
+
+    def goto_file(self, file, line, column):
+        if self.thread_guard():
+            window = 0
+            test_window = self.get_window()
+            if not self.call('getwinvar', test_window, self.VIM_LLDB_WINDOW_KEY):
+                window = test_window
+            else:
+                test_window = self.get_last_window()
+                if not self.call('getwinvar', test_window, self.VIM_LLDB_WINDOW_KEY):
                     window = test_window
+                else:
+                    window_count = self.get_window_count()
+                    for test_window in range(1, window_count + 1):
+                        if not self.call('getwinvar', test_window, self.VIM_LLDB_WINDOW_KEY):
+                            window = test_window
+                            break
+            if window:
+                self.command(f'{window} wincmd w')
+            else:
+                self.command('vnew')
+                window = self.get_window()
+
+            buffer = 0
+            buffer_count = self.get_buffer()
+            for test_buffer in range(1, buffer_count + 1):
+                test_file = self.get_buffer_file(test_buffer)
+                if test_file == file:
+                    buffer = test_buffer
                     break
-    if window:
-        command(nvim, f'{window} wincmd w')
-    else:
-        command(nvim, 'vnew')
-        window = call(nvim, 'winnr')
+            if buffer:
+                self.command(f'buffer {buffer}')
+            else:
+                edit_file = os.path.relpath(file)
+                self.command(f'edit {edit_file}')
 
-    buffer = 0
-    buffer_count = call(nvim, 'bufnr')
-    for test_buffer in range(1, buffer_count + 1):
-        test_file = get_file(nvim, test_buffer)
-        if test_file == file:
-            buffer = test_buffer
-            break
-    if buffer:
-        command(nvim, f'buffer {buffer}')
-    else:
-        edit_file = os.path.relpath(file)
-        command(nvim, f'edit {edit_file}')
+            self.call('cursor', line, column)
 
-    call(nvim, 'cursor', line, column)
+    def check_window_exists(self, name):
+        if self.thread_guard():
+            window_count = self.get_window_count()
+            for window in range(1, window_count + 1):
+                window_name = self.call('getwinvar', window, self.VIM_LLDB_WINDOW_KEY)
+                if window_name == name:
+                    return window
+            return 0
 
+    def create_window(self, name):
+        if self.thread_guard():
+            if not self.check_window_exists(name):
+                self.command('vnew')
+
+                window = self.get_window()
+                self.call('setwinvar', window, '&readonly', 1)
+                self.call('setwinvar', window, '&modifiable', 0)
+                self.call('setwinvar', window, '&buftype', 'nofile')
+                self.call('setwinvar', window, '&buflisted', 0)
+                self.call('setwinvar', window, '&number', 0)
+                self.call('setwinvar', window, '&ruler', 0)
+                self.call('setwinvar', window, '&wrap', 0)
+
+                self.command(f'file vim-lldb({name})')
+                self.call('setwinvar', window, self.VIM_LLDB_WINDOW_KEY, name)
+
+                if name == 'stack':
+                    self.command('nnoremap <buffer> <CR> :call GotoFrame()<CR>')
+
+                self.command('wincmd p')
+
+    def update_window(self, name, data):
+        if self.thread_guard():
+            @contextmanager
+            def writable(window):
+                self.call('setwinvar', window, '&readonly', 0)
+                self.call('setwinvar', window, '&modifiable', 1)
+                yield
+                self.call('setwinvar', window, '&readonly', 1)
+                self.call('setwinvar', window, '&modifiable', 0)
+                self.call('setwinvar', window, '&modified', 0)
+
+            window = self.check_window_exists(name)
+            if window:
+                with writable(window):
+                    if name == 'stack':
+                        buffer = self.call('winbufnr', window)
+                        self.call('deletebufline', buffer, 1, '$')
+                        line = 1
+                        for thread_info in data['threads']:
+                            for frame_info in thread_info['frames']:
+                                if frame_info['type'] == 'full':
+                                    frame_line = f'{frame_info["function"]}  ({frame_info["file"]}:{frame_info["line"]})'
+                                else:
+                                    frame_line = f'{frame_info["function"]}  ({frame_info["module"]})'
+                                self.call('setbufline', buffer, line, frame_line)
+                                line += 1
 
 class Context:
     def __init__(self, nvim):
-        self.nvim = nvim
-        command(self.nvim, 'highlight vim_lldb_highlight_breakpoint guifg=red')
-        call(self.nvim, 'sign_define', 'vim_lldb_sign_breakpoint', { 'text': '●', 'texthl': 'vim_lldb_highlight_breakpoint' })
-        command(self.nvim, 'highlight vim_lldb_highlight_cursor guifg=yellow')
-        call(self.nvim, 'sign_define', 'vim_lldb_sign_cursor', { 'text': '➨', 'texthl': 'vim_lldb_highlight_cursor' })
+        self.view = View(nvim, threading.current_thread().ident)
 
         self.debugger = lldb.SBDebugger.Create()
         self.debugger.SetAsync(True)
@@ -142,7 +231,6 @@ class Context:
         self.process_info = None
         self.process_state = None
 
-        self.sign_id = 0
         self.bp_list = []
         self.cursor_list = []
 
@@ -175,10 +263,10 @@ class Context:
         if error.Success():
             self.process_info = get_process_info(process)
             self.process_state = process_state_str(process.GetState())
-            create_window(self.nvim, 'stack')
+            self.view.create_window('stack')
         else:
             # TODO: Error reporting
-            logerr(self.nvim, error.GetCString())
+            self.view.log_error(error.GetCString())
 
 
     def step_over(self):
@@ -188,7 +276,7 @@ class Context:
         thread.StepOver(lldb.eOnlyDuringStepping, error)
         if error.Fail():
             # TODO: Error reporting
-            logerr(self.nvim, error.GetCString())
+            self.view.log_error(error.GetCString())
 
     def step_into(self):
         process = self.target.GetProcess()
@@ -225,8 +313,8 @@ class Context:
         if not self.target:
             self.create_target(0)
 
-        file = get_file(self.nvim, call(self.nvim, 'bufnr'))
-        line = call(self.nvim, 'line', '.')
+        file = self.view.get_buffer_file()
+        line = self.view.get_line()
 
         curr_bp = None
         for bp in self.bp_list:
@@ -238,61 +326,34 @@ class Context:
             self.bp_list.remove(curr_bp)
             if not self.target.BreakpointDelete(curr_bp['id']):
                 # TODO: Error handling
-                logerr(self.nvim, 'Cannot delete breakpoint')
+                self.view.log_error('Cannot delete breakpoint')
         else:
             bp = self.target.BreakpointCreateByLocation(file, line)
             if bp.IsValid():
                 self.bp_list.append({ 'file': file, 'line': line, 'id': bp.GetID() })
             else:
                 # TODO: Error handling
-                logerr(self.nvim, 'Cannot create breakpoint')
+                self.view.log_error('Cannot create breakpoint')
 
-        self.sync_sign('vim_lldb_sign_breakpoint', self.bp_list)
+        self.sync_signs(self.view.VIM_LLDB_SIGN_BREAKPOINT, self.bp_list)
 
-    def sync_sign(self, sign_type, sign_list):
-        buffer_count = call(self.nvim, 'bufnr')
-        for buffer in range(1, buffer_count + 1):
-            buffer_curr_sign_list = call(self.nvim, 'sign_getplaced', buffer, { 'group': sign_type })[0]['signs']
-            buffer_sign_list = [sign for sign in sign_list if sign['file'] == get_file(self.nvim, buffer)]
+    def sync_signs(self):
+        self.view.sync_signs(self.view.VIM_LLDB_SIGN_BREAKPOINT, self.bp_list)
+        self.view.sync_signs(self.view.VIM_LLDB_SIGN_CURSOR, self.cursor_list)
 
-            for buffer_curr_sign in buffer_curr_sign_list:
-                found = False
-                for buffer_sign in buffer_sign_list:
-                    if buffer_curr_sign['lnum'] == buffer_sign['line']:
-                        found = True
-                        break
-                if not found:
-                    call(self.nvim, 'sign_unplace', sign_type, { 'buffer': buffer, 'id': buffer_curr_sign['id'] })
-
-            for buffer_sign in buffer_sign_list:
-                found = False
-                for buffer_curr_sign in buffer_curr_sign_list:
-                    if buffer_sign['line'] == buffer_curr_sign['lnum']:
-                        found = True
-                        break
-                if not found:
-                    self.sign_id += 1
-                    priorities = { 'vim_lldb_sign_breakpoint': 1000, 'vim_lldb_sign_cursor': 2000 }
-                    call(self.nvim, 'sign_place', self.sign_id, sign_type, sign_type, buffer,
-                         { 'lnum': buffer_sign['line'], 'priority': priorities[sign_type]})
-
-    def sync_all_sign(self):
-        self.sync_sign('vim_lldb_sign_breakpoint', self.bp_list)
-        self.sync_sign('vim_lldb_sign_cursor', self.cursor_list)
-
-    def goto_frame(self, thread, frame):
+    def goto_frame(self, thread = 0, frame = 0):
         thread_info = self.process_info['threads'][0]
-        frame = frame or call(self.nvim, 'line', '.')
+        frame = frame or self.get_line()
         frame_info = thread_info['frames'][frame - 1]
         if frame_info['type'] == 'full':
-            goto_file(self.nvim, frame_info['file'], frame_info['line'], frame_info['column'])
+            self.view.goto_file(frame_info['file'], frame_info['line'], frame_info['column'])
 
     def update_process_cursor(self):
         self.cursor_list = []
         for thread_info in self.process_info['threads']:
             top_frame = thread_info['frames'][0]
             self.cursor_list.append({ 'file': top_frame['file'], 'line': top_frame['line'], 'id': thread_info['id'] })
-        self.sync_sign('vim_lldb_sign_cursor', self.cursor_list)
+        self.sync_signs(self.view.VIM_LLDB_SIGN_CURSOR, self.cursor_list)
 
 
 def event_loop(context):
@@ -307,20 +368,20 @@ def event_loop(context):
                         process = lldb.SBProcess.GetProcessFromEvent(event)
                         state = lldb.SBProcess.GetStateFromEvent(event)
                         context.process_state = process_state_str(state)
-                        context.nvim.async_call(log, context.nvim, context.process_state)
+                        context.view.log_info(context.process_state)
 
                         if state == lldb.eStateStopped:
                             context.process_info = get_process_info(process)
-                            context.nvim.async_call(log, context.nvim, context.process_info)
+                            context.view.log_info(context.process_info)
 
-                            context.nvim.async_call(update_window, context.nvim, 'stack', context.process_info)
-                            context.nvim.async_call(Context.update_process_cursor, context)
+                            context.view.update_window('stack', context.process_info)
+                            context.update_process_cursor()
                         elif state == lldb.eStateRunning:
                             pass
                         elif state == lldb.eStateExited:
                             pass
     except Exception as e:
-        context.nvim.async_call(logerr, context.nvim, e.message)
+        context.view.log_error(e.message)
 
 def process_state_str(state):
     dictionary = {

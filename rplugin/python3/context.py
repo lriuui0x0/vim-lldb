@@ -1,5 +1,6 @@
 import os
 import threading
+import traceback
 import inspect
 from contextlib import contextmanager
 import lldb
@@ -28,6 +29,7 @@ class View:
     def __init__(self, nvim, tid):
         self.nvim = nvim
         self.tid = tid
+        self.log_info(f'main thread id: {self.tid}')
 
         self.sign_id = 0
         self.command(f'highlight {self.VIM_LLDB_SIGN_BREAKPOINT}_HIGHLIGHT guifg=red')
@@ -43,9 +45,8 @@ class View:
             function = getattr(View, frame_info.function)
             args_info = inspect.getargvalues(frame_info.frame)
             args = list(map(args_info.locals.get, args_info.args))
-            context.nvim.async_call(function, *args)
+            self.nvim.async_call(function, *args)
             return False
-
 
     def command(self, cmd):
         if self.thread_guard():
@@ -55,13 +56,28 @@ class View:
         if self.thread_guard():
             return self.nvim.call(func, *args)
 
+    # TODO: Figure out how to post multi-line string as one message
+    def to_lines(self, value):
+        return [repr(line) for line in value.split('\n')]
+
     def log_info(self, value):
         if self.thread_guard():
-            self.command(f'echomsg {repr(value)}')
+            if type(value) == str:
+                for line in self.to_lines(value):
+                    self.command(f'echomsg {line}')
+            else:
+                self.command(f'echomsg {repr(value)}')
 
     def log_error(self, value):
+        # NOTE: echoerr seems to be treated as throwing error
         if self.thread_guard():
-            self.command(f'echoerr {repr(value)}')
+            if type(value) == str:
+                for line in self.to_lines(value):
+                    self.command(f'echohl ErrorMsg')
+                    self.command(f'echomsg {line}')
+            else:
+                self.command(f'echohl ErrorMsg')
+                self.command(f'echomsg {repr(value)}')
 
     def get_window(self):
         if self.thread_guard():
@@ -101,7 +117,7 @@ class View:
             buffer_count = self.get_buffer_count()
             for buffer in range(1, buffer_count + 1):
                 buffer_curr_sign_list = self.call('sign_getplaced', buffer, { 'group': sign_type })[0]['signs']
-                buffer_sign_list = [sign for sign in sign_list if sign['file'] == self.view.get_buffer_file(buffer)]
+                buffer_sign_list = [sign for sign in sign_list if sign['file'] == self.get_buffer_file(buffer)]
 
                 for buffer_curr_sign in buffer_curr_sign_list:
                     found = False
@@ -268,7 +284,6 @@ class Context:
             # TODO: Error reporting
             self.view.log_error(error.GetCString())
 
-
     def step_over(self):
         process = self.target.GetProcess()
         thread = process.GetSelectedThread();
@@ -335,7 +350,7 @@ class Context:
                 # TODO: Error handling
                 self.view.log_error('Cannot create breakpoint')
 
-        self.sync_signs(self.view.VIM_LLDB_SIGN_BREAKPOINT, self.bp_list)
+        self.view.sync_signs(self.view.VIM_LLDB_SIGN_BREAKPOINT, self.bp_list)
 
     def sync_signs(self):
         self.view.sync_signs(self.view.VIM_LLDB_SIGN_BREAKPOINT, self.bp_list)
@@ -353,11 +368,11 @@ class Context:
         for thread_info in self.process_info['threads']:
             top_frame = thread_info['frames'][0]
             self.cursor_list.append({ 'file': top_frame['file'], 'line': top_frame['line'], 'id': thread_info['id'] })
-        self.sync_signs(self.view.VIM_LLDB_SIGN_CURSOR, self.cursor_list)
-
+        self.view.sync_signs(self.view.VIM_LLDB_SIGN_CURSOR, self.cursor_list)
 
 def event_loop(context):
     try:
+        context.view.log_info(f'event thread id: {threading.current_thread().ident}')
         listener = context.debugger.GetListener()
         while True:
             event = lldb.SBEvent()
@@ -368,7 +383,6 @@ def event_loop(context):
                         process = lldb.SBProcess.GetProcessFromEvent(event)
                         state = lldb.SBProcess.GetStateFromEvent(event)
                         context.process_state = process_state_str(state)
-                        context.view.log_info(context.process_state)
 
                         if state == lldb.eStateStopped:
                             context.process_info = get_process_info(process)
@@ -380,8 +394,8 @@ def event_loop(context):
                             pass
                         elif state == lldb.eStateExited:
                             pass
-    except Exception as e:
-        context.view.log_error(e.message)
+    except Exception:
+        context.view.log_error(traceback.format_exc())
 
 def process_state_str(state):
     dictionary = {

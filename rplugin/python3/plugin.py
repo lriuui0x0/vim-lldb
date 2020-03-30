@@ -1,7 +1,6 @@
 import sys
 from os import path
 sys.path.append(path.dirname(__file__))
-
 import pynvim
 import lldb
 from context import Context

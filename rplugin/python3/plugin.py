@@ -14,51 +14,43 @@ class Handler(object):
 
     @pynvim.function('Launch')
     def launch(self, args):
-        self.startup()
         self.context.launch()
 
     @pynvim.function('StepOver')
     def step_over(self, args):
-        self.startup()
         self.context.step_over()
 
     @pynvim.function('StepInto')
     def step_into(self, args):
-        self.startup()
         self.context.step_into()
 
     @pynvim.function('StepOut')
     def step_out(self, args):
-        self.startup()
         self.context.step_out()
 
     @pynvim.function('Resume')
     def resume(self, args):
-        self.startup()
         self.context.resume()
 
     @pynvim.function('Stop')
     def stop(self, args):
-        self.startup()
         self.context.stop()
 
     @pynvim.function('Kill')
     def kill(self, args):
-        self.startup()
         self.context.kill()
 
     @pynvim.function('ToggleBreakpoint')
     def toggle_breakpoint(self, args):
-        self.startup()
         self.context.toggle_breakpoint()
 
     @pynvim.function('GotoFrame')
     def goto_frame(self, args):
-        self.startup()
         self.context.goto_frame(args[0], args[1])
 
     @pynvim.autocmd('BufEnter')
     def buffer_sync_sign(self):
+        # NOTE: BufEnter is called on vim startup, initialize here
         self.startup()
         self.context.sync_signs()
 

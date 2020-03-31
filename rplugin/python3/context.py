@@ -235,6 +235,21 @@ class View:
                                 self.call('setbufline', buffer, line, frame_line)
                                 line += 1
 
+    def destory_window(self, name = ''):
+        if self.thread_guard():
+            while True:
+                window_count = self.get_window_count()
+                for window in range(1, window_count + 1):
+                    window_name = self.call('getwinvar', window, self.VIM_LLDB_WINDOW_KEY)
+                    if window_name and (name == '' or window_name == name):
+                        if window_count > 1:
+                            self.command(f'{window}quit!')
+                        else:
+                            self.command(f'enew!')
+                        break
+                if window_count == 1:
+                    break
+
 class Context:
     def __init__(self, nvim):
         self.view = View(nvim, threading.current_thread().ident)
@@ -386,14 +401,14 @@ def event_loop(context):
 
                         if state == lldb.eStateStopped:
                             context.process_info = get_process_info(process)
-                            context.view.log_info(context.process_info)
-
                             context.view.update_window('stack', context.process_info)
                             context.update_process_cursor()
                         elif state == lldb.eStateRunning:
                             pass
                         elif state == lldb.eStateExited:
-                            pass
+                            context.process_info = {'threads': []}
+                            context.view.destory_window()
+                            context.update_process_cursor()
     except Exception:
         context.view.log_error(traceback.format_exc())
 

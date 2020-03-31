@@ -12,6 +12,10 @@ class Handler(object):
         self.started = False
         self.context = None
 
+    @pynvim.function('SelectTarget')
+    def launch(self, args):
+        self.context.select_target()
+
     @pynvim.function('Launch')
     def launch(self, args):
         self.context.launch()
@@ -46,7 +50,7 @@ class Handler(object):
 
     @pynvim.function('GotoFrame')
     def goto_frame(self, args):
-        self.context.goto_frame(args[0], args[1])
+        self.context.goto_frame()
 
     @pynvim.autocmd('BufEnter')
     def buffer_sync_sign(self):

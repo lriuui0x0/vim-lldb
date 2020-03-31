@@ -6,7 +6,8 @@ from contextlib import contextmanager
 import lldb
 
 # TODO
-# Ask Greg: resource management (e.g. SBTarget), error handling (SBError vs IsValid), Python C++ interface
+# Ask Greg:
+# resource management (e.g. SBTarget), error handling (SBError vs IsValid), Python C++ interface
 # multiple processes per target?
 # passing string (and other elements) through API
 # guarantee only one thread may have stop reason?
@@ -14,6 +15,7 @@ import lldb
 # module.GetFileSpec() vs module.GetPlatformFileSpec()?
 # relationship between SBSymbol, SBModule, SBSymbolContext
 # differences between all the step functions
+# Why does StepInto not fail
 
 # TODO
 # Vim long time exit
@@ -75,6 +77,7 @@ class View:
                 for line in self.to_lines(value):
                     self.command(f'echohl ErrorMsg')
                     self.command(f'echomsg {line}')
+                    self.command(f'echohl NormalNC')
             else:
                 self.command(f'echohl ErrorMsg')
                 self.command(f'echomsg {repr(value)}')
@@ -99,6 +102,10 @@ class View:
         if self.thread_guard():
             return self.call('bufnr', '$')
 
+    def is_buffer_valid(self, buffer):
+        if self.thread_guard():
+            return bool(self.call('bufexists', buffer))
+
     def get_line(self):
         if self.thread_guard():
             return self.call('line', '.')
@@ -116,29 +123,31 @@ class View:
         if self.thread_guard():
             buffer_count = self.get_buffer_count()
             for buffer in range(1, buffer_count + 1):
-                buffer_curr_sign_list = self.call('sign_getplaced', buffer, { 'group': sign_type })[0]['signs']
-                buffer_sign_list = [sign for sign in sign_list if sign['file'] == self.get_buffer_file(buffer)]
+                if self.is_buffer_valid(buffer):
+                    self.log_info(f'buffer valid {buffer}')
+                    buffer_curr_sign_list = self.call('sign_getplaced', buffer, { 'group': sign_type })[0]['signs']
+                    buffer_sign_list = [sign for sign in sign_list if sign['file'] == self.get_buffer_file(buffer)]
 
-                for buffer_curr_sign in buffer_curr_sign_list:
-                    found = False
-                    for buffer_sign in buffer_sign_list:
-                        if buffer_curr_sign['lnum'] == buffer_sign['line']:
-                            found = True
-                            break
-                    if not found:
-                        self.call('sign_unplace', sign_type, { 'buffer': buffer, 'id': buffer_curr_sign['id'] })
-
-                for buffer_sign in buffer_sign_list:
-                    found = False
                     for buffer_curr_sign in buffer_curr_sign_list:
-                        if buffer_sign['line'] == buffer_curr_sign['lnum']:
-                            found = True
-                            break
-                    if not found:
-                        self.sign_id += 1
-                        priorities = {self.VIM_LLDB_SIGN_BREAKPOINT: 1000, self.VIM_LLDB_SIGN_CURSOR: 2000}
-                        self.call('sign_place', self.sign_id, sign_type, sign_type, buffer,
-                             { 'lnum': buffer_sign['line'], 'priority': priorities[sign_type]})
+                        found = False
+                        for buffer_sign in buffer_sign_list:
+                            if buffer_curr_sign['lnum'] == buffer_sign['line']:
+                                found = True
+                                break
+                        if not found:
+                            self.call('sign_unplace', sign_type, { 'buffer': buffer, 'id': buffer_curr_sign['id'] })
+
+                    for buffer_sign in buffer_sign_list:
+                        found = False
+                        for buffer_curr_sign in buffer_curr_sign_list:
+                            if buffer_sign['line'] == buffer_curr_sign['lnum']:
+                                found = True
+                                break
+                        if not found:
+                            self.sign_id += 1
+                            priorities = {self.VIM_LLDB_SIGN_BREAKPOINT: 1000, self.VIM_LLDB_SIGN_CURSOR: 2000}
+                            self.call('sign_place', self.sign_id, sign_type, sign_type, buffer,
+                                 { 'lnum': buffer_sign['line'], 'priority': priorities[sign_type]})
 
     def goto_file(self, file, line, column):
         if self.thread_guard():
@@ -165,10 +174,11 @@ class View:
             buffer = 0
             buffer_count = self.get_buffer()
             for test_buffer in range(1, buffer_count + 1):
-                test_file = self.get_buffer_file(test_buffer)
-                if test_file == file:
-                    buffer = test_buffer
-                    break
+                if self.view.is_buffer_valid(test_buffer):
+                    test_file = self.get_buffer_file(test_buffer)
+                    if test_file == file:
+                        buffer = test_buffer
+                        break
             if buffer:
                 self.command(f'buffer {buffer}')
             else:
@@ -251,16 +261,19 @@ class View:
                     break
 
 class Context:
+    EXITED_PROCESS_INFO = { 'state': 'exited', 'threads': [] }
+
     def __init__(self, nvim):
         self.view = View(nvim, threading.current_thread().ident)
 
         self.debugger = lldb.SBDebugger.Create()
         self.debugger.SetAsync(True)
 
-        self.registered_targets = [{ 'executable': 'test/main',  'arguments': [], 'working_dir': '/', 'environments': [] }]
-        self.target = None
-        self.process_info = None
-        self.process_state = None
+        self.targets = []
+        self.selected_target = None
+        self.select_target(0)
+
+        self.process_info = self.EXITED_PROCESS_INFO
 
         self.bp_list = []
         self.cursor_list = []
@@ -269,120 +282,182 @@ class Context:
         self.event_loop = threading.Thread(target=event_loop, args=(self,))
         self.event_loop.start()
 
-    def create_target(self, index):
+    def select_target(self, selection = 0):
+        targets = self.view.call('eval', 'g:vim_lldb_targets')
+        self.targets = []
+        if type(targets) == list:
+            for target in targets:
+                if (type(target) == dict and set(target) == {'name', 'executable', 'arguments', 'working_dir', 'environments'}):
+                    self.targets.append(target)
+                else:
+                    self.view.log_error('Incorrect target format')
+                    return False
+
+        self.selected_target = None
+        if type(selection) == int:
+            if selection >= 0 and selection < len(self.targets):
+                self.selected_target = self.targets[selection].copy()
+            else:
+                self.view.log_error('Target index out of bound')
+                return False
+        elif type(selection) == str:
+            matched_targets = [target for target in self.targets if target.name == selection]
+            if len(matched_targets) == 1:
+                self.selected_target = matched_targets.copy()
+            else:
+                self.view.log_error('Target name not found' if len(matched_targets) == 0 else 'Ambiguous target name')
+                return False
+        else:
+            self.view.log_error('Invalid target selection')
+            return False
+
         # TODO: Delete old target? Preserve breakpoint for the same executable
-        executable = self.registered_targets[index]['executable']
-        self.target = self.debugger.CreateTargetWithFileAndTargetTriple(executable, 'x86_64-unknown-linux-gnu')
+        executable = self.selected_target['executable']
+        self.selected_target['handle'] = self.debugger.CreateTargetWithFileAndTargetTriple(executable, 'x86_64-unknown-linux-gnu')
+        return True
 
     def launch(self):
-        if not self.target:
-            self.create_target(0)
+        if self.selected_target:
+            if self.process_info['state'] == 'exited':
+                executable = self.selected_target['executable']
+                arguments = self.selected_target['arguments']
+                working_dir = self.selected_target['working_dir']
+                environments = self.selected_target['environments']
 
-        executable = self.registered_targets[0]['executable']
-        arguments = self.registered_targets[0]['arguments']
-        working_dir = self.registered_targets[0]['working_dir']
-        environments = self.registered_targets[0]['environments']
-
-        launch_info = lldb.SBLaunchInfo([])
-        launch_info.SetExecutableFile(lldb.SBFileSpec(executable), True)
-        launch_info.SetArguments(arguments, True)
-        launch_info.SetEnvironmentEntries(environments, True)
-        launch_info.SetWorkingDirectory(working_dir)
-        launch_info.SetLaunchFlags(0)
-        error = lldb.SBError()
-        process = self.target.Launch(launch_info, error)
-        if error.Success():
-            self.process_info = get_process_info(process)
-            self.process_state = process_state_str(process.GetState())
-            self.view.create_window('stack')
+                launch_info = lldb.SBLaunchInfo([])
+                launch_info.SetExecutableFile(lldb.SBFileSpec(executable), True)
+                launch_info.SetArguments(arguments, True)
+                launch_info.SetEnvironmentEntries(environments, True)
+                launch_info.SetWorkingDirectory(working_dir)
+                launch_info.SetLaunchFlags(0)
+                error = lldb.SBError()
+                process = self.selected_target['handle'].Launch(launch_info, error)
+                if error.Success():
+                    self.process_info = get_process_info(process)
+                    self.view.create_window('stack')
+                else:
+                    self.view.log_error(error.GetCString())
+            else:
+                self.view.log_error('Cannot launch process from non-exited state')
         else:
-            # TODO: Error reporting
-            self.view.log_error(error.GetCString())
+            self.view.log_error('No target selected')
 
     def step_over(self):
-        process = self.target.GetProcess()
-        thread = process.GetSelectedThread();
-        error = lldb.SBError()
-        thread.StepOver(lldb.eOnlyDuringStepping, error)
-        if error.Fail():
-            # TODO: Error reporting
-            self.view.log_error(error.GetCString())
+        if self.selected_target:
+            if self.process_info['state'] == 'stopped':
+                process = self.selected_target['handle'].GetProcess()
+                # TODO: Get current thread
+                thread = process.GetSelectedThread();
+                error = lldb.SBError()
+                thread.StepOver(lldb.eOnlyDuringStepping, error)
+                if error.Fail():
+                    self.view.log_error(error.GetCString())
+            else:
+                self.view.log_error('Cannot step from non-stopped state')
+        else:
+            self.view.log_error('No target selected')
 
     def step_into(self):
-        process = self.target.GetProcess()
-        thread = process.GetSelectedThread()
-        thread.StepInto()
+        if self.selected_target:
+            if self.process_info['state'] == 'stopped':
+                process = self.selected_target['handle'].GetProcess()
+                thread = process.GetSelectedThread()
+                thread.StepInto()
+            else:
+                self.view.log_error('Cannot step from non-stopped state')
+        else:
+            self.view.log_error('No target selected')
 
     def step_out(self):
-        process = self.target.GetProcess()
-        thread = process.GetSelectedThread()
-        thread.StepOut()
+        if self.selected_target:
+            if self.process_info['state'] == 'stopped':
+                process = self.selected_target['handle'].GetProcess()
+                thread = process.GetSelectedThread()
+                thread.StepOut()
+            else:
+                self.view.log_error('Cannot step from non-stopped state')
+        else:
+            self.view.log_error('No target selected')
 
     def resume(self):
-        process = self.target.GetProcess()
-        error = process.Continue()
-        if error.Fail():
-            # TODO: Error reporting
-            pass
+        if self.selected_target:
+            if self.process_info['state'] == 'stopped':
+                process = self.selected_target['handle'].GetProcess()
+                error = process.Continue()
+                if error.Fail():
+                    self.view.log_error(error.GetCString())
+            else:
+                self.view.log_error('Cannot resume from non-stopped state')
+        else:
+            self.view.log_error('No target selected')
 
     def stop(self):
-        process = self.target.GetProcess()
-        error = process.Stop()
-        if error.Fail():
-            # TODO: Error reporting
-            pass
+        if self.selected_target:
+            if self.process_info['state'] == 'running':
+                process = self.selected_target['handle'].GetProcess()
+                error = process.Stop()
+                if error.Fail():
+                    self.view.log_error(error.GetCString())
+            else:
+                self.view.log_error('Cannot stop from non-running state')
+        else:
+            self.view.log_error('No target selected')
 
     def kill(self):
-        process = self.target.GetProcess()
-        error = process.Kill()
-        if error.Fail():
-            # TODO: Error reporting
-            pass
-
-    def toggle_breakpoint(self):
-        if not self.target:
-            self.create_target(0)
-
-        file = self.view.get_buffer_file()
-        line = self.view.get_line()
-
-        curr_bp = None
-        for bp in self.bp_list:
-            if bp['file'] == file and bp['line'] == line:
-                curr_bp = bp
-                break
-
-        if curr_bp:
-            self.bp_list.remove(curr_bp)
-            if not self.target.BreakpointDelete(curr_bp['id']):
-                # TODO: Error handling
-                self.view.log_error('Cannot delete breakpoint')
-        else:
-            bp = self.target.BreakpointCreateByLocation(file, line)
-            if bp.IsValid():
-                self.bp_list.append({ 'file': file, 'line': line, 'id': bp.GetID() })
+        if self.selected_target:
+            if self.process_info['state'] != 'exited':
+                process = self.selected_target['handle'].GetProcess()
+                error = process.Kill()
+                if error.Fail():
+                    self.view.log_error(error.GetCString())
             else:
-                # TODO: Error handling
-                self.view.log_error('Cannot create breakpoint')
-
-        self.view.sync_signs(self.view.VIM_LLDB_SIGN_BREAKPOINT, self.bp_list)
-
-    def sync_signs(self):
-        self.view.sync_signs(self.view.VIM_LLDB_SIGN_BREAKPOINT, self.bp_list)
-        self.view.sync_signs(self.view.VIM_LLDB_SIGN_CURSOR, self.cursor_list)
-
-    def goto_frame(self, thread = 0, frame = 0):
-        thread_info = self.process_info['threads'][0]
-        frame = frame or self.get_line()
-        frame_info = thread_info['frames'][frame - 1]
-        if frame_info['type'] == 'full':
-            self.view.goto_file(frame_info['file'], frame_info['line'], frame_info['column'])
+                self.view.log_error('Cannot kill from exited state')
+        else:
+            self.view.log_error('No target selected')
 
     def update_process_cursor(self):
         self.cursor_list = []
         for thread_info in self.process_info['threads']:
             top_frame = thread_info['frames'][0]
             self.cursor_list.append({ 'file': top_frame['file'], 'line': top_frame['line'], 'id': thread_info['id'] })
+        self.view.sync_signs(self.view.VIM_LLDB_SIGN_CURSOR, self.cursor_list)
+
+    def goto_frame(self, thread = 0, frame = 0):
+        # TODO: Goto selected thread
+        thread_info = self.process_info['threads'][0]
+        frame = frame or self.get_line()
+        frame_info = thread_info['frames'][frame - 1]
+        if frame_info['type'] == 'full':
+            self.view.goto_file(frame_info['file'], frame_info['line'], frame_info['column'])
+
+    def toggle_breakpoint(self):
+        if self.selected_target:
+            file = self.view.get_buffer_file()
+            line = self.view.get_line()
+
+            curr_bp = None
+            for bp in self.bp_list:
+                if bp['file'] == file and bp['line'] == line:
+                    curr_bp = bp
+                    break
+
+            if curr_bp:
+                self.bp_list.remove(curr_bp)
+                if not self.selected_target['handle'].BreakpointDelete(curr_bp['id']):
+                    self.view.log_error('Cannot remove breakpoint')
+            else:
+                bp = self.selected_target['handle'].BreakpointCreateByLocation(file, line)
+                if bp.IsValid():
+                    self.bp_list.append({ 'file': file, 'line': line, 'id': bp.GetID() })
+                else:
+                    self.view.log_error('Cannot create breakpoint')
+
+            self.view.sync_signs(self.view.VIM_LLDB_SIGN_BREAKPOINT, self.bp_list)
+        else:
+            self.view.log_error('No target selected')
+
+    def sync_signs(self):
+        self.view.sync_signs(self.view.VIM_LLDB_SIGN_BREAKPOINT, self.bp_list)
         self.view.sync_signs(self.view.VIM_LLDB_SIGN_CURSOR, self.cursor_list)
 
 def event_loop(context):
@@ -397,16 +472,16 @@ def event_loop(context):
                     if event_type == lldb.SBProcess.eBroadcastBitStateChanged:
                         process = lldb.SBProcess.GetProcessFromEvent(event)
                         state = lldb.SBProcess.GetStateFromEvent(event)
-                        context.process_state = process_state_str(state)
 
                         if state == lldb.eStateStopped:
                             context.process_info = get_process_info(process)
                             context.view.update_window('stack', context.process_info)
                             context.update_process_cursor()
                         elif state == lldb.eStateRunning:
+                            # TODO: Report state?
                             pass
                         elif state == lldb.eStateExited:
-                            context.process_info = {'threads': []}
+                            context.process_info = context.EXITED_PROCESS_INFO
                             context.view.destory_window()
                             context.update_process_cursor()
     except Exception:
@@ -431,6 +506,7 @@ def process_state_str(state):
 
 def get_process_info(process):
     process_info = {}
+    process_info['state'] = process_state_str(process.GetState())
     process_info['threads'] = []
     for thread in process:
         thread_info = {}

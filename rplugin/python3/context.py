@@ -18,6 +18,8 @@ import lldb
 # Why does StepInto not fail
 
 # TODO
+# Create new target and attach breakpoints on launch
+# Handle multiple threads
 # Vim long time exit
 # Unreliable continue stepping
 # Workaround airline?
@@ -173,7 +175,7 @@ class View:
             buffer = 0
             buffer_count = self.get_buffer()
             for test_buffer in range(1, buffer_count + 1):
-                if self.view.is_buffer_valid(test_buffer):
+                if self.is_buffer_valid(test_buffer):
                     test_file = self.get_buffer_file(test_buffer)
                     if test_file == file:
                         buffer = test_buffer
@@ -212,7 +214,10 @@ class View:
             self.call('setwinvar', window, self.VIM_LLDB_WINDOW_KEY, name)
 
             if name == 'stack':
-                self.command('nnoremap <buffer> <CR> :call GotoFrame()<CR>')
+                self.command('nnoremap <buffer> <CR> :call StackWindow_GotoFrame()<CR>')
+            elif name == 'breakpoint':
+                self.command('nnoremap <buffer> <CR> :call BreakpointWindow_GotoBreakpoint()<CR>')
+                self.command('nnoremap <buffer> <DEL> :call BreakpointWindow_DeleteBreakpoint()<CR>')
 
     def destory_window(self, name = ''):
         if self.thread_guard():
@@ -244,17 +249,31 @@ class View:
             if window:
                 with writable(window):
                     buffer = self.call('winbufnr', window)
+                    self.call('deletebufline', buffer, 1, '$')
                     if name == 'stack':
-                        self.call('deletebufline', buffer, 1, '$')
-                        line = 1
-                        for thread_info in data['threads']:
-                            for frame_info in thread_info['frames']:
-                                if frame_info['type'] == 'full':
-                                    frame_line = f'{frame_info["function"]}  ({frame_info["file"]}:{frame_info["line"]})'
-                                else:
-                                    frame_line = f'{frame_info["function"]}  ({frame_info["module"]})'
-                                self.call('setbufline', buffer, line, frame_line)
+                        if data['state'] == 'exited':
+                            line = 1
+                            self.call('setbufline', buffer, line, 'processs exited')
+                        else:
+                            line = 1
+                            for thread_info in data['threads']:
+                                for frame_info in thread_info['frames']:
+                                    if frame_info['type'] == 'full':
+                                        frame_line = f'{frame_info["function"]}  ({frame_info["file"]}:{frame_info["line"]})'
+                                    else:
+                                        frame_line = f'{frame_info["function"]}  ({frame_info["module"]})'
+                                    self.call('setbufline', buffer, line, frame_line)
+                                    line += 1
+
+                                self.call('setbufline', buffer, line, '')
                                 line += 1
+                                self.call('setbufline', buffer, line, f'thread {thread_info["id"]}')
+                    elif name == 'breakpoint':
+                        line = 1
+                        for breakpoint in data:
+                            self.call('setbufline', buffer, line, f'{breakpoint["file"]}:{breakpoint["line"]}')
+                            line += 1
+
 
 class Context:
     EXITED_PROCESS_INFO = { 'state': 'exited', 'threads': [] }
@@ -270,9 +289,7 @@ class Context:
         self.select_target(0)
 
         self.process_info = self.EXITED_PROCESS_INFO
-
-        self.bp_list = []
-        self.cursor_list = []
+        self.breakpoint_list = []
 
         self.event_loop_exit = threading.Semaphore(value = 0)
         self.event_loop = threading.Thread(target=event_loop, args=(self,))
@@ -287,9 +304,15 @@ class Context:
             window = self.view.get_window()
 
             self.view.command('vnew')
+            self.view.create_window('breakpoint')
+
+            self.view.command('new')
             self.view.create_window('stack')
 
             self.view.command(f'{window} wincmd w')
+
+            self.view.update_window('stack', self.process_info)
+            self.view.update_window('breakpoint', self.breakpoint_list)
 
     def select_target(self, selection = 0):
         if self.view.call('exists', 'g:vim_lldb_targets'):
@@ -426,19 +449,11 @@ class Context:
             self.view.log_error('No target selected')
 
     def update_process_cursor(self):
-        self.cursor_list = []
+        cursor_list = []
         for thread_info in self.process_info['threads']:
             top_frame = thread_info['frames'][0]
-            self.cursor_list.append({ 'file': top_frame['file'], 'line': top_frame['line'], 'id': thread_info['id'] })
-        self.view.sync_signs(self.view.VIM_LLDB_SIGN_CURSOR, self.cursor_list)
-
-    def goto_frame(self, thread = 0, frame = 0):
-        # TODO: Goto selected thread
-        thread_info = self.process_info['threads'][0]
-        frame = frame or self.get_line()
-        frame_info = thread_info['frames'][frame - 1]
-        if frame_info['type'] == 'full':
-            self.view.goto_file(frame_info['file'], frame_info['line'], frame_info['column'])
+            cursor_list.append({ 'file': top_frame['file'], 'line': top_frame['line'], 'id': thread_info['id'] })
+        self.view.sync_signs(self.view.VIM_LLDB_SIGN_CURSOR, cursor_list)
 
     def toggle_breakpoint(self):
         if self.selected_target:
@@ -446,29 +461,54 @@ class Context:
             line = self.view.get_line()
 
             curr_bp = None
-            for bp in self.bp_list:
-                if bp['file'] == file and bp['line'] == line:
-                    curr_bp = bp
+            for breakpoint in self.breakpoint_list:
+                if breakpoint['file'] == file and breakpoint['line'] == line:
+                    curr_bp = breakpoint
                     break
 
             if curr_bp:
-                self.bp_list.remove(curr_bp)
-                if not self.selected_target['handle'].BreakpointDelete(curr_bp['id']):
+                if self.selected_target['handle'].BreakpointDelete(curr_bp['id']):
+                    self.breakpoint_list.remove(curr_bp)
+                else:
                     self.view.log_error('Cannot remove breakpoint')
             else:
-                bp = self.selected_target['handle'].BreakpointCreateByLocation(file, line)
-                if bp.IsValid():
-                    self.bp_list.append({ 'file': file, 'line': line, 'id': bp.GetID() })
+                breakpoint = self.selected_target['handle'].BreakpointCreateByLocation(file, line)
+                if breakpoint.IsValid():
+                    self.breakpoint_list.append({ 'file': file, 'line': line, 'id': breakpoint.GetID() })
                 else:
                     self.view.log_error('Cannot create breakpoint')
 
-            self.view.sync_signs(self.view.VIM_LLDB_SIGN_BREAKPOINT, self.bp_list)
+            self.view.update_window('breakpoint', self.breakpoint_list)
+            self.view.sync_signs(self.view.VIM_LLDB_SIGN_BREAKPOINT, self.breakpoint_list)
         else:
             self.view.log_error('No target selected')
 
+    def stack_window_goto_frame(self):
+        # TODO: Goto selected thread
+        thread_info = self.process_info['threads'][0]
+        frame_index = self.view.get_line() - 1
+        frame_info = thread_info['frames'][frame_index]
+        if frame_info['type'] == 'full':
+            self.view.goto_file(frame_info['file'], frame_info['line'], frame_info['column'])
+
+    def breakpoint_window_goto_breakpoint(self):
+        breakpoint_index = self.view.get_line() - 1
+        breakpoint = self.breakpoint_list[breakpoint_index]
+        self.view.goto_file(breakpoint['file'], breakpoint['line'], 0)
+
+    def breakpoint_window_delete_breakpoint(self):
+        breakpoint_index = self.view.get_line() - 1
+        breakpoint = self.breakpoint_list[breakpoint_index]
+        if self.selected_target['handle'].BreakpointDelete(breakpoint['id']):
+            self.breakpoint_list.remove(breakpoint)
+            self.view.update_window('breakpoint', self.breakpoint_list)
+            self.view.sync_signs(self.view.VIM_LLDB_SIGN_BREAKPOINT, self.breakpoint_list)
+        else:
+            self.view.log_error('Cannot remove breakpoint')
+
     def sync_signs(self):
-        self.view.sync_signs(self.view.VIM_LLDB_SIGN_BREAKPOINT, self.bp_list)
-        self.view.sync_signs(self.view.VIM_LLDB_SIGN_CURSOR, self.cursor_list)
+        self.view.sync_signs(self.view.VIM_LLDB_SIGN_BREAKPOINT, self.breakpoint_list)
+        self.update_process_cursor()
 
 def event_loop(context):
     try:

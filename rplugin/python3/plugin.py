@@ -52,9 +52,17 @@ class Handler(object):
     def toggle_breakpoint(self, args):
         self.context.toggle_breakpoint()
 
-    @pynvim.function('GotoFrame')
-    def goto_frame(self, args):
-        self.context.goto_frame()
+    @pynvim.function('StackWindow_GotoFrame')
+    def stack_window_goto_frame(self, args):
+        self.context.stack_window_goto_frame()
+
+    @pynvim.function('BreakpointWindow_GotoBreakpoint')
+    def breakpoint_window_goto_breakpoint(self, args):
+        self.context.breakpoint_window_goto_breakpoint()
+
+    @pynvim.function('BreakpointWindow_DeleteBreakpoint')
+    def breakpoint_window_delete_breakpoint(self, args):
+        self.context.breakpoint_window_delete_breakpoint()
 
     @pynvim.autocmd('BufEnter')
     def buffer_sync_sign(self):

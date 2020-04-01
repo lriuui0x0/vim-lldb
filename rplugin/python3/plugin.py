@@ -12,8 +12,12 @@ class Handler(object):
         self.started = False
         self.context = None
 
+    @pynvim.function('ToggleDebugger')
+    def toggle_debugger(self, args):
+        self.context.toggle_debugger()
+
     @pynvim.function('SelectTarget')
-    def launch(self, args):
+    def select_target(self, args):
         self.context.select_target()
 
     @pynvim.function('Launch')

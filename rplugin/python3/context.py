@@ -104,7 +104,7 @@ class View:
 
     def is_buffer_valid(self, buffer):
         if self.thread_guard():
-            return bool(self.call('bufexists', buffer))
+            return bool(self.call('buflisted', buffer))
 
     def get_line(self):
         if self.thread_guard():
@@ -124,7 +124,6 @@ class View:
             buffer_count = self.get_buffer_count()
             for buffer in range(1, buffer_count + 1):
                 if self.is_buffer_valid(buffer):
-                    self.log_info(f'buffer valid {buffer}')
                     buffer_curr_sign_list = self.call('sign_getplaced', buffer, { 'group': sign_type })[0]['signs']
                     buffer_sign_list = [sign for sign in sign_list if sign['file'] == self.get_buffer_file(buffer)]
 
@@ -187,63 +186,33 @@ class View:
 
             self.call('cursor', line, column)
 
-    def check_window_exists(self, name):
+    def check_window_exists(self, name = ''):
         if self.thread_guard():
             window_count = self.get_window_count()
             for window in range(1, window_count + 1):
                 window_name = self.call('getwinvar', window, self.VIM_LLDB_WINDOW_KEY)
-                if window_name == name:
-                    return window
+                if window_name:
+                    if name == '' or window_name == name:
+                        return window
             return 0
 
     def create_window(self, name):
         if self.thread_guard():
-            if not self.check_window_exists(name):
-                self.command('vnew')
+            window = self.get_window()
+            self.call('setwinvar', window, '&readonly', 1)
+            self.call('setwinvar', window, '&modifiable', 0)
+            self.call('setwinvar', window, '&buftype', 'nofile')
+            self.call('setwinvar', window, '&buflisted', 0)
+            self.call('setwinvar', window, '&bufhidden', 'wipe')
+            self.call('setwinvar', window, '&number', 0)
+            self.call('setwinvar', window, '&ruler', 0)
+            self.call('setwinvar', window, '&wrap', 0)
 
-                window = self.get_window()
-                self.call('setwinvar', window, '&readonly', 1)
-                self.call('setwinvar', window, '&modifiable', 0)
-                self.call('setwinvar', window, '&buftype', 'nofile')
-                self.call('setwinvar', window, '&buflisted', 0)
-                self.call('setwinvar', window, '&number', 0)
-                self.call('setwinvar', window, '&ruler', 0)
-                self.call('setwinvar', window, '&wrap', 0)
+            self.command(f'file vim-lldb({name})')
+            self.call('setwinvar', window, self.VIM_LLDB_WINDOW_KEY, name)
 
-                self.command(f'file vim-lldb({name})')
-                self.call('setwinvar', window, self.VIM_LLDB_WINDOW_KEY, name)
-
-                if name == 'stack':
-                    self.command('nnoremap <buffer> <CR> :call GotoFrame()<CR>')
-
-                self.command('wincmd p')
-
-    def update_window(self, name, data):
-        if self.thread_guard():
-            @contextmanager
-            def writable(window):
-                self.call('setwinvar', window, '&readonly', 0)
-                self.call('setwinvar', window, '&modifiable', 1)
-                yield
-                self.call('setwinvar', window, '&readonly', 1)
-                self.call('setwinvar', window, '&modifiable', 0)
-                self.call('setwinvar', window, '&modified', 0)
-
-            window = self.check_window_exists(name)
-            if window:
-                with writable(window):
-                    if name == 'stack':
-                        buffer = self.call('winbufnr', window)
-                        self.call('deletebufline', buffer, 1, '$')
-                        line = 1
-                        for thread_info in data['threads']:
-                            for frame_info in thread_info['frames']:
-                                if frame_info['type'] == 'full':
-                                    frame_line = f'{frame_info["function"]}  ({frame_info["file"]}:{frame_info["line"]})'
-                                else:
-                                    frame_line = f'{frame_info["function"]}  ({frame_info["module"]})'
-                                self.call('setbufline', buffer, line, frame_line)
-                                line += 1
+            if name == 'stack':
+                self.command('nnoremap <buffer> <CR> :call GotoFrame()<CR>')
 
     def destory_window(self, name = ''):
         if self.thread_guard():
@@ -259,6 +228,33 @@ class View:
                         break
                 if window_count == 1:
                     break
+
+    def update_window(self, name, data):
+        if self.thread_guard():
+            @contextmanager
+            def writable(window):
+                self.call('setwinvar', window, '&readonly', 0)
+                self.call('setwinvar', window, '&modifiable', 1)
+                yield
+                self.call('setwinvar', window, '&readonly', 1)
+                self.call('setwinvar', window, '&modifiable', 0)
+                self.call('setwinvar', window, '&modified', 0)
+
+            window = self.check_window_exists(name)
+            if window:
+                with writable(window):
+                    buffer = self.call('winbufnr', window)
+                    if name == 'stack':
+                        self.call('deletebufline', buffer, 1, '$')
+                        line = 1
+                        for thread_info in data['threads']:
+                            for frame_info in thread_info['frames']:
+                                if frame_info['type'] == 'full':
+                                    frame_line = f'{frame_info["function"]}  ({frame_info["file"]}:{frame_info["line"]})'
+                                else:
+                                    frame_line = f'{frame_info["function"]}  ({frame_info["module"]})'
+                                self.call('setbufline', buffer, line, frame_line)
+                                line += 1
 
 class Context:
     EXITED_PROCESS_INFO = { 'state': 'exited', 'threads': [] }
@@ -282,8 +278,25 @@ class Context:
         self.event_loop = threading.Thread(target=event_loop, args=(self,))
         self.event_loop.start()
 
+    def toggle_debugger(self):
+        window = self.view.get_window()
+
+        if self.view.check_window_exists():
+            self.view.destory_window()
+        else:
+            window = self.view.get_window()
+
+            self.view.command('vnew')
+            self.view.create_window('stack')
+
+            self.view.command(f'{window} wincmd w')
+
     def select_target(self, selection = 0):
-        targets = self.view.call('eval', 'g:vim_lldb_targets')
+        if self.view.call('exists', 'g:vim_lldb_targets'):
+            targets = self.view.call('eval', 'g:vim_lldb_targets')
+        else:
+            self.view.log_error('No target definition')
+            return False
         self.targets = []
         if type(targets) == list:
             for target in targets:
@@ -311,7 +324,7 @@ class Context:
             self.view.log_error('Invalid target selection')
             return False
 
-        # TODO: Delete old target? Preserve breakpoint for the same executable
+        # TODO: Delete old target? Preserve breakpoints for the same executable
         executable = self.selected_target['executable']
         self.selected_target['handle'] = self.debugger.CreateTargetWithFileAndTargetTriple(executable, 'x86_64-unknown-linux-gnu')
         return True
@@ -332,10 +345,7 @@ class Context:
                 launch_info.SetLaunchFlags(0)
                 error = lldb.SBError()
                 process = self.selected_target['handle'].Launch(launch_info, error)
-                if error.Success():
-                    self.process_info = get_process_info(process)
-                    self.view.create_window('stack')
-                else:
+                if error.Fail():
                     self.view.log_error(error.GetCString())
             else:
                 self.view.log_error('Cannot launch process from non-exited state')
@@ -482,7 +492,7 @@ def event_loop(context):
                             pass
                         elif state == lldb.eStateExited:
                             context.process_info = context.EXITED_PROCESS_INFO
-                            context.view.destory_window()
+                            context.view.update_window('stack', context.process_info)
                             context.update_process_cursor()
     except Exception:
         context.view.log_error(traceback.format_exc())

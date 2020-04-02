@@ -1,4 +1,5 @@
 import os
+import re
 import threading
 import traceback
 import inspect
@@ -19,7 +20,6 @@ import lldb
 
 # TODO
 # Handle multiple threads
-# Lock cpp files when process is running
 # Vim long time exit
 # Unreliable continue stepping
 # Workaround airline?
@@ -27,6 +27,7 @@ import lldb
 
 class Context:
     VIM_LLDB_WINDOW_KEY = 'vim_lldb'
+    VIM_LLDB_WINDOW_LOCK = 'vim_lldb_window_lock'
     VIM_LLDB_SIGN_BREAKPOINT = 'vim_lldb_sign_breakpoint'
     VIM_LLDB_SIGN_CURSOR = 'vim_lldb_sign_cursor'
     EXITED_PROCESS_INFO = { 'state': 'exited', 'threads': [] }
@@ -114,6 +115,9 @@ class Context:
 
     def is_buffer_valid(self, buffer):
         return bool(self.call('buflisted', buffer))
+
+    def get_window_buffer(self, window = 0):
+        return self.call('winbufnr', window)
 
     def get_line(self):
         return self.call('line', '.')
@@ -292,6 +296,23 @@ class Context:
                             self.call('setbufline', buffer, line, f'{breakpoint["file"]}:{breakpoint["line"]}')
                             line += 1
 
+    def lock_files(self):
+        window_count = self.get_window_count()
+        for window in range(1, window_count + 1):
+            buffer = self.get_window_buffer()
+            if re.compile(r'.*\.(c|cpp|cxx|h|hpp|hxx)$').match(self.get_buffer_file(buffer)):
+                self.call('setwinvar', window, '&readonly', 1)
+                self.call('setwinvar', window, '&modifiable', 0)
+                self.call('setwinvar', window, self.VIM_LLDB_WINDOW_LOCK, 1)
+
+    def unlock_files(self):
+        if self.thread_guard():
+            window_count = self.get_window_count()
+            for window in range(1, window_count + 1):
+                if self.call('getwinvar', window, self.VIM_LLDB_WINDOW_LOCK):
+                    self.call('setwinvar', window, '&readonly', 0)
+                    self.call('setwinvar', window, '&modifiable', 1)
+                
     def toggle_debugger(self):
         window = self.get_window()
 
@@ -373,7 +394,9 @@ class Context:
                 launch_info.SetLaunchFlags(0)
                 error = lldb.SBError()
                 process = self.selected_target['handle'].Launch(launch_info, error)
-                if error.Fail():
+                if error.Success():
+                    self.lock_files()
+                else:
                     self.log_error(error.GetCString())
             else:
                 self.log_error('Cannot launch process from non-exited state')
@@ -521,6 +544,8 @@ class Context:
     def buffer_sync(self):
         self.sync_signs(self.VIM_LLDB_SIGN_BREAKPOINT, self.breakpoint_list)
         self.update_process_cursor()
+        if self.process_info['state'] != 'exited':
+            self.lock_files()
 
     def breakpoint_sync_back(self):
         if not self.is_window():
@@ -549,12 +574,12 @@ def event_loop(context):
                             frame_info = thread_info['frames'][0]
                             context.goto_file(frame_info['file'], frame_info['line'], frame_info['column'])
                         elif state == lldb.eStateRunning:
-                            # TODO: Report state?
                             pass
                         elif state == lldb.eStateExited:
                             context.process_info = context.EXITED_PROCESS_INFO
                             context.update_window('stack', context.process_info)
                             context.update_process_cursor()
+                            context.unlock_files()
     except Exception:
         context.log_error(traceback.format_exc())
 

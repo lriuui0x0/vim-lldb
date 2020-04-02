@@ -65,10 +65,22 @@ class Handler(object):
         self.context.breakpoint_window_delete_breakpoint()
 
     @pynvim.autocmd('BufEnter')
-    def buffer_sync_sign(self):
+    def buffer_sync(self):
         # NOTE: BufEnter is called on vim startup, initialize here
         self.startup()
-        self.context.sync_signs()
+        self.context.buffer_sync()
+
+    @pynvim.autocmd('TextChanged')
+    def breakpoint_sync_back1(self):
+        self.context.breakpoint_sync_back()
+
+    @pynvim.autocmd('TextChangedI')
+    def breakpoint_sync_back2(self):
+        self.context.breakpoint_sync_back()
+
+    @pynvim.autocmd('TextChangedP')
+    def breakpoint_sync_back3(self):
+        self.context.breakpoint_sync_back()
 
     @pynvim.autocmd('VimLeavePre')
     def shutdown(self):

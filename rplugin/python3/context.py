@@ -18,8 +18,8 @@ import lldb
 # Why does StepInto not fail
 
 # TODO
-# Create new target and attach breakpoints on launch
 # Handle multiple threads
+# Lock cpp files when process is running
 # Vim long time exit
 # Unreliable continue stepping
 # Workaround airline?
@@ -150,6 +150,20 @@ class View:
                             self.call('sign_place', self.sign_id, sign_type, sign_type, buffer,
                                  { 'lnum': buffer_sign['line'], 'priority': priorities[sign_type]})
 
+    def sync_back_signs(self, sign_type, sign_list):
+        if self.thread_guard():
+            buffer = self.get_buffer()
+            buffer_curr_sign_list = sorted(self.call('sign_getplaced', buffer, { 'group': sign_type })[0]['signs'], key=lambda x: x['lnum'])
+            buffer_sign_list = sorted([sign for sign in sign_list if sign['file'] == self.get_buffer_file(buffer)], key=lambda x: x['line'])
+
+            has_change = False
+            for i in range(len(buffer_sign_list)):
+                if buffer_sign_list[i]['line'] != buffer_curr_sign_list[i]['lnum']:
+                    buffer_sign_list[i]['line'] = buffer_curr_sign_list[i]['lnum']
+                    has_change = True
+
+            return has_change
+
     def goto_file(self, file, line, column):
         if self.thread_guard():
             window = 0
@@ -187,6 +201,12 @@ class View:
                 self.command(f'edit {edit_file}')
 
             self.call('cursor', line, column)
+
+    def is_window(self, name = ''):
+        if self.thread_guard():
+            window = self.get_window()
+            window_name = self.call('getwinvar', window, self.VIM_LLDB_WINDOW_KEY)
+            return window_name and (name == '' or window_name == name)
 
     def check_window_exists(self, name = ''):
         if self.thread_guard():
@@ -347,9 +367,6 @@ class Context:
             self.view.log_error('Invalid target selection')
             return False
 
-        # TODO: Delete old target? Preserve breakpoints for the same executable
-        executable = self.selected_target['executable']
-        self.selected_target['handle'] = self.debugger.CreateTargetWithFileAndTargetTriple(executable, 'x86_64-unknown-linux-gnu')
         return True
 
     def launch(self):
@@ -359,6 +376,17 @@ class Context:
                 arguments = self.selected_target['arguments']
                 working_dir = self.selected_target['working_dir']
                 environments = self.selected_target['environments']
+
+                if 'handle' in self.selected_target and self.selected_target['handle']:
+                    self.debugger.DeleteTarget(self.selected_target['handle'])
+                self.selected_target['handle'] = self.debugger.CreateTargetWithFileAndTargetTriple(executable, 'x86_64-unknown-linux-gnu')
+
+                for breakpoint in self.breakpoint_list:
+                    target_breakpoint = self.selected_target['handle'].BreakpointCreateByLocation(breakpoint['file'], breakpoint['line'])
+                    if target_breakpoint.IsValid():
+                        breakpoint['id'] = target_breakpoint.GetID()
+                    else:
+                        self.view.log_error('Cannot create breakpoint')
 
                 launch_info = lldb.SBLaunchInfo([])
                 launch_info.SetExecutableFile(lldb.SBFileSpec(executable), True)
@@ -467,16 +495,22 @@ class Context:
                     break
 
             if curr_bp:
-                if self.selected_target['handle'].BreakpointDelete(curr_bp['id']):
+                if self.process_info['state'] == 'exited':
                     self.breakpoint_list.remove(curr_bp)
                 else:
-                    self.view.log_error('Cannot remove breakpoint')
+                    if self.selected_target['handle'].BreakpointDelete(curr_bp['id']):
+                        self.breakpoint_list.remove(curr_bp)
+                    else:
+                        self.view.log_error('Cannot remove breakpoint')
             else:
-                breakpoint = self.selected_target['handle'].BreakpointCreateByLocation(file, line)
-                if breakpoint.IsValid():
-                    self.breakpoint_list.append({ 'file': file, 'line': line, 'id': breakpoint.GetID() })
+                if self.process_info['state'] == 'exited':
+                    self.breakpoint_list.append({ 'file': file, 'line': line })
                 else:
-                    self.view.log_error('Cannot create breakpoint')
+                    breakpoint = self.selected_target['handle'].BreakpointCreateByLocation(file, line)
+                    if breakpoint.IsValid():
+                        self.breakpoint_list.append({ 'file': file, 'line': line, 'id': breakpoint.GetID() })
+                    else:
+                        self.view.log_error('Cannot create breakpoint')
 
             self.view.update_window('breakpoint', self.breakpoint_list)
             self.view.sync_signs(self.view.VIM_LLDB_SIGN_BREAKPOINT, self.breakpoint_list)
@@ -506,9 +540,14 @@ class Context:
         else:
             self.view.log_error('Cannot remove breakpoint')
 
-    def sync_signs(self):
+    def buffer_sync(self):
         self.view.sync_signs(self.view.VIM_LLDB_SIGN_BREAKPOINT, self.breakpoint_list)
         self.update_process_cursor()
+
+    def breakpoint_sync_back(self):
+        if not self.view.is_window():
+            if self.view.sync_back_signs(self.view.VIM_LLDB_SIGN_BREAKPOINT, self.breakpoint_list):
+                self.view.update_window('breakpoint', self.breakpoint_list)
 
 def event_loop(context):
     try:
@@ -527,6 +566,10 @@ def event_loop(context):
                             context.process_info = get_process_info(process)
                             context.view.update_window('stack', context.process_info)
                             context.update_process_cursor()
+
+                            thread_info = context.process_info['stopped_thread']
+                            frame_info = thread_info['frames'][0]
+                            context.view.goto_file(frame_info['file'], frame_info['line'], frame_info['column'])
                         elif state == lldb.eStateRunning:
                             # TODO: Report state?
                             pass
@@ -583,6 +626,6 @@ def get_process_info(process):
 
         stop_reason = thread.GetStopReason() 
         if stop_reason != lldb.eStopReasonNone:
-            process_info['stopped_thread_id'] = thread_info['id']
+            process_info['stopped_thread'] = thread_info
     return process_info
 

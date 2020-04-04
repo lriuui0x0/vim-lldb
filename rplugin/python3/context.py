@@ -19,10 +19,7 @@ import lldb
 # Why does StepInto not fail
 
 # TODO
-# Handle multiple threads
-# Vim long time exit
 # Unreliable continue stepping
-# Workaround airline?
 # Investigate wrong frame information, image lookup --verbose --address <pc>
 
 class Context:
@@ -51,9 +48,10 @@ class Context:
         self.select_target(0)
 
         self.process_info = self.EXITED_PROCESS_INFO
+        self.selected_thread_info = None
         self.breakpoint_list = []
 
-        self.event_loop_exit = threading.Semaphore(value = 0)
+        self.exit_broadcaster = lldb.SBBroadcaster('exit_broadcaster')
         self.event_loop = threading.Thread(target=event_loop, args=(self,))
         self.event_loop.start()
 
@@ -171,42 +169,47 @@ class Context:
         return has_change
 
     def goto_file(self, file, line, column):
-        if self.thread_guard():
-            window = 0
-            test_window = self.get_window()
+        window = 0
+        test_window = self.get_window()
+        if not self.call('getwinvar', test_window, self.VIM_LLDB_WINDOW_KEY):
+            window = test_window
+        else:
+            test_window = self.get_last_window()
             if not self.call('getwinvar', test_window, self.VIM_LLDB_WINDOW_KEY):
                 window = test_window
             else:
-                test_window = self.get_last_window()
-                if not self.call('getwinvar', test_window, self.VIM_LLDB_WINDOW_KEY):
-                    window = test_window
-                else:
-                    window_count = self.get_window_count()
-                    for test_window in range(1, window_count + 1):
-                        if not self.call('getwinvar', test_window, self.VIM_LLDB_WINDOW_KEY):
-                            window = test_window
-                            break
-            if window:
-                self.command(f'{window} wincmd w')
-            else:
-                self.command('vnew')
-                window = self.get_window()
-
-            buffer = 0
-            buffer_count = self.get_buffer()
-            for test_buffer in range(1, buffer_count + 1):
-                if self.is_buffer_valid(test_buffer):
-                    test_file = self.get_buffer_file(test_buffer)
-                    if test_file == file:
-                        buffer = test_buffer
+                window_count = self.get_window_count()
+                for test_window in range(1, window_count + 1):
+                    if not self.call('getwinvar', test_window, self.VIM_LLDB_WINDOW_KEY):
+                        window = test_window
                         break
-            if buffer:
-                self.command(f'buffer {buffer}')
-            else:
-                edit_file = os.path.relpath(file)
-                self.command(f'edit {edit_file}')
+        if window:
+            self.command(f'{window} wincmd w')
+        else:
+            self.command('vnew')
+            window = self.get_window()
 
-            self.call('cursor', line, column)
+        buffer = 0
+        buffer_count = self.get_buffer()
+        for test_buffer in range(1, buffer_count + 1):
+            if self.is_buffer_valid(test_buffer):
+                test_file = self.get_buffer_file(test_buffer)
+                if test_file == file:
+                    buffer = test_buffer
+                    break
+        if buffer:
+            self.command(f'buffer {buffer}')
+        else:
+            edit_file = os.path.relpath(file)
+            self.command(f'edit {edit_file}')
+
+        self.call('cursor', line, column)
+
+    def goto_thread(self, thread_info):
+        if self.thread_guard():
+            for frame_info in thread_info['frames']:
+                if frame_info['type'] == 'full':
+                    self.goto_file(frame_info['file'], frame_info['line'], frame_info['column'])
 
     def is_window(self, name = ''):
         window = self.get_window()
@@ -256,7 +259,7 @@ class Context:
             if window_count == 1:
                 break
 
-    def update_window(self, name, data):
+    def update_window(self, name):
         if self.thread_guard():
             @contextmanager
             def writable(window):
@@ -273,26 +276,24 @@ class Context:
                     buffer = self.call('winbufnr', window)
                     self.call('deletebufline', buffer, 1, '$')
                     if name == 'stack':
-                        if data['state'] == 'exited':
-                            line = 1
-                            self.call('setbufline', buffer, line, 'processs exited')
+                        if self.process_info['state'] == 'exited':
+                            self.call('setbufline', buffer, 1, 'processs exited')
                         else:
+                            thread_info = self.selected_thread_info or self.process_info['threads'][0]
                             line = 1
-                            for thread_info in data['threads']:
-                                for frame_info in thread_info['frames']:
-                                    if frame_info['type'] == 'full':
-                                        frame_line = f'{frame_info["function"]}  ({frame_info["file"]}:{frame_info["line"]})'
-                                    else:
-                                        frame_line = f'{frame_info["function"]}  ({frame_info["module"]})'
-                                    self.call('setbufline', buffer, line, frame_line)
-                                    line += 1
-
-                                self.call('setbufline', buffer, line, '')
+                            for frame_info in thread_info['frames']:
+                                if frame_info['type'] == 'full':
+                                    frame_line = f'{frame_info["function"]}  ({frame_info["file"]}:{frame_info["line"]})'
+                                else:
+                                    frame_line = f'{frame_info["function"]}  ({frame_info["module"]})'
+                                self.call('setbufline', buffer, line, frame_line)
                                 line += 1
-                                self.call('setbufline', buffer, line, f'thread {thread_info["id"]}')
+                            self.call('setbufline', buffer, line, '')
+                            line += 1
+                            self.call('setbufline', buffer, line, f'thread {thread_info["id"]}')
                     elif name == 'breakpoint':
                         line = 1
-                        for breakpoint in data:
+                        for breakpoint in self.breakpoint_list:
                             self.call('setbufline', buffer, line, f'{breakpoint["file"]}:{breakpoint["line"]}')
                             line += 1
 
@@ -329,8 +330,8 @@ class Context:
 
             self.command(f'{window} wincmd w')
 
-            self.update_window('stack', self.process_info)
-            self.update_window('breakpoint', self.breakpoint_list)
+            self.update_window('stack')
+            self.update_window('breakpoint')
 
     def select_target(self, selection = 0):
         if self.call('exists', 'g:vim_lldb_targets'):
@@ -407,8 +408,7 @@ class Context:
         if self.selected_target:
             if self.process_info['state'] == 'stopped':
                 process = self.selected_target['handle'].GetProcess()
-                # TODO: Get current thread
-                thread = process.GetSelectedThread();
+                thread = process.GetThreadByIndexID(self.selected_thread_info['id']);
                 error = lldb.SBError()
                 thread.StepOver(lldb.eOnlyDuringStepping, error)
                 if error.Fail():
@@ -422,7 +422,7 @@ class Context:
         if self.selected_target:
             if self.process_info['state'] == 'stopped':
                 process = self.selected_target['handle'].GetProcess()
-                thread = process.GetSelectedThread()
+                thread = process.GetThreadByIndexID(self.selected_thread_info['id']);
                 thread.StepInto()
             else:
                 self.log_error('Cannot step from non-stopped state')
@@ -433,7 +433,7 @@ class Context:
         if self.selected_target:
             if self.process_info['state'] == 'stopped':
                 process = self.selected_target['handle'].GetProcess()
-                thread = process.GetSelectedThread()
+                thread = process.GetThreadByIndexID(self.selected_thread_info['id']);
                 thread.StepOut()
             else:
                 self.log_error('Cannot step from non-stopped state')
@@ -489,18 +489,18 @@ class Context:
             file = self.get_buffer_file()
             line = self.get_line()
 
-            curr_bp = None
+            curr_breakpoint = None
             for breakpoint in self.breakpoint_list:
                 if breakpoint['file'] == file and breakpoint['line'] == line:
-                    curr_bp = breakpoint
+                    curr_breakpoint = breakpoint
                     break
 
-            if curr_bp:
+            if curr_breakpoint:
                 if self.process_info['state'] == 'exited':
-                    self.breakpoint_list.remove(curr_bp)
+                    self.breakpoint_list.remove(curr_breakpoint)
                 else:
-                    if self.selected_target['handle'].BreakpointDelete(curr_bp['id']):
-                        self.breakpoint_list.remove(curr_bp)
+                    if self.selected_target['handle'].BreakpointDelete(curr_breakpoint['id']):
+                        self.breakpoint_list.remove(curr_breakpoint)
                     else:
                         self.log_error('Cannot remove breakpoint')
             else:
@@ -513,18 +513,33 @@ class Context:
                     else:
                         self.log_error('Cannot create breakpoint')
 
-            self.update_window('breakpoint', self.breakpoint_list)
+            self.update_window('breakpoint')
             self.sync_signs(self.VIM_LLDB_SIGN_BREAKPOINT, self.breakpoint_list)
         else:
             self.log_error('No target selected')
 
     def stack_window_goto_frame(self):
-        # TODO: Goto selected thread
-        thread_info = self.process_info['threads'][0]
-        frame_index = self.get_line() - 1
-        frame_info = thread_info['frames'][frame_index]
-        if frame_info['type'] == 'full':
-            self.goto_file(frame_info['file'], frame_info['line'], frame_info['column'])
+        if self.process_info['state'] != 'exited':
+            frame_index = self.get_line() - 1
+            frame_info = self.selected_thread_info['frames'][frame_index]
+            if frame_info['type'] == 'full':
+                self.goto_file(frame_info['file'], frame_info['line'], frame_info['column'])
+
+    def stack_window_next_thread(self):
+        if self.process_info['state'] != 'exited':
+            index = self.process_info['threads'].index(self.selected_thread_info)
+            index = (index + 1) % len(self.process_info['threads'])
+            self.selected_thread_info = self.process_info['threads'][index]
+            self.update_window('stack')
+            self.goto_thread(self.selected_thread_info)
+
+    def stack_window_prev_thread(self):
+        if self.process_info['state'] != 'exited':
+            index = self.process_info['threads'].index(self.selected_thread_info)
+            index = (index - 1 + len(self.process_info['threads'])) % len(self.process_info['threads'])
+            self.selected_thread_info = self.process_info['threads'][index]
+            self.update_window('stack')
+            self.goto_thread(self.selected_thread_info)
 
     def breakpoint_window_goto_breakpoint(self):
         breakpoint_index = self.get_line() - 1
@@ -536,7 +551,7 @@ class Context:
         breakpoint = self.breakpoint_list[breakpoint_index]
         if self.selected_target['handle'].BreakpointDelete(breakpoint['id']):
             self.breakpoint_list.remove(breakpoint)
-            self.update_window('breakpoint', self.breakpoint_list)
+            self.update_window('breakpoint')
             self.sync_signs(self.VIM_LLDB_SIGN_BREAKPOINT, self.breakpoint_list)
         else:
             self.log_error('Cannot remove breakpoint')
@@ -550,12 +565,13 @@ class Context:
     def breakpoint_sync_back(self):
         if not self.is_window():
             if self.sync_back_signs(self.VIM_LLDB_SIGN_BREAKPOINT, self.breakpoint_list):
-                self.update_window('breakpoint', self.breakpoint_list)
+                self.update_window('breakpoint')
 
 def event_loop(context):
     try:
         context.log_info(f'event thread id: {threading.current_thread().ident}')
         listener = context.debugger.GetListener()
+        listener.StartListeningForEvents(context.exit_broadcaster, 0xffffffff)
         while True:
             event = lldb.SBEvent()
             if listener.WaitForEvent(1, event):
@@ -566,25 +582,25 @@ def event_loop(context):
                         state = lldb.SBProcess.GetStateFromEvent(event)
 
                         if state == lldb.eStateStopped:
-                            context.process_info = get_process_info(process)
-                            context.update_window('stack', context.process_info)
+                            context.process_info, context.selected_thread_info = get_process_info(process)
+                            context.update_window('stack')
                             context.update_process_cursor()
-
-                            thread_info = context.process_info['stopped_thread']
-                            frame_info = thread_info['frames'][0]
-                            context.goto_file(frame_info['file'], frame_info['line'], frame_info['column'])
+                            context.goto_thread(context.selected_thread_info)
                         elif state == lldb.eStateRunning:
                             pass
                         elif state == lldb.eStateExited:
                             context.process_info = context.EXITED_PROCESS_INFO
-                            context.update_window('stack', context.process_info)
+                            context.selected_thread_info = None
+                            context.update_window('stack')
                             context.update_process_cursor()
                             context.unlock_files()
+                elif event.BroadcasterMatchesRef(context.exit_broadcaster):
+                    break
     except Exception:
         context.log_error(traceback.format_exc())
 
-def process_state_str(state):
-    dictionary = {
+def get_process_info(process):
+    process_state_dictionary = {
         lldb.eStateInvalid: 'invalid',
         lldb.eStateUnloaded: 'unloaded',
         lldb.eStateConnected: 'connected',
@@ -598,11 +614,10 @@ def process_state_str(state):
         lldb.eStateExited: 'exited',
         lldb.eStateSuspended: 'suspended',
     }
-    return dictionary[state]
 
-def get_process_info(process):
     process_info = {}
-    process_info['state'] = process_state_str(process.GetState())
+    stopped_thread_info = None
+    process_info['state'] = process_state_dictionary[process.GetState()]
     process_info['threads'] = []
     for thread in process:
         thread_info = {}
@@ -629,6 +644,6 @@ def get_process_info(process):
 
         stop_reason = thread.GetStopReason() 
         if stop_reason != lldb.eStopReasonNone:
-            process_info['stopped_thread'] = thread_info
-    return process_info
+            stopped_thread_info = thread_info
+    return process_info, stopped_thread_info
 

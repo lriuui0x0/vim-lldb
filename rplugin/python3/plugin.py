@@ -56,6 +56,14 @@ class Handler(object):
     def stack_window_goto_frame(self, args):
         self.context.stack_window_goto_frame()
 
+    @pynvim.function('StackWindow_NextThread')
+    def stack_window_next_thread(self, args):
+        self.context.stack_window_next_thread()
+
+    @pynvim.function('StackWindow_PrevThread')
+    def stack_window_prev_thread(self, args):
+        self.context.stack_window_prev_thread()
+
     @pynvim.function('BreakpointWindow_GotoBreakpoint')
     def breakpoint_window_goto_breakpoint(self, args):
         self.context.breakpoint_window_goto_breakpoint()
@@ -85,8 +93,7 @@ class Handler(object):
     @pynvim.autocmd('VimLeavePre')
     def shutdown(self):
         if self.started:
-            lldb.SBDebugger.Terminate()
-            self.context.event_loop_exit.release()
+            self.context.exit_broadcaster.BroadcastEventByType(1)
             self.context.event_loop.join()
 
     def startup(self):

@@ -68,9 +68,21 @@ class Handler(object):
     def breakpoint_window_goto_breakpoint(self, args):
         self.context.breakpoint_window_goto_breakpoint()
 
-    @pynvim.function('BreakpointWindow_DeleteBreakpoint')
-    def breakpoint_window_delete_breakpoint(self, args):
-        self.context.breakpoint_window_delete_breakpoint()
+    @pynvim.function('BreakpointWindow_RemoveBreakpoint')
+    def breakpoint_window_remove_breakpoint(self, args):
+        self.context.breakpoint_window_remove_breakpoint()
+
+    @pynvim.function('WatchWindow_AddWatch')
+    def watch_window_add_watch(self, args):
+        self.context.watch_window_add_watch()
+
+    @pynvim.function('WatchWindow_ChangeWatch')
+    def watch_window_change_watch(self, args):
+        self.context.watch_window_change_watch()
+
+    @pynvim.function('WatchWindow_RemoveWatch')
+    def watch_window_remove_watch(self, args):
+        self.context.watch_window_remove_watch()
 
     @pynvim.autocmd('BufEnter')
     def buffer_sync(self):

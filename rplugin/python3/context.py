@@ -19,7 +19,6 @@ import lldb
 # Why does StepInto not fail
 
 # TODO
-# Unreliable continue stepping
 # Investigate wrong frame information, image lookup --verbose --address <pc>
 
 class Context:
@@ -49,7 +48,9 @@ class Context:
 
         self.process_info = self.EXITED_PROCESS_INFO
         self.selected_thread_info = None
+        self.selected_frames = []
         self.breakpoint_list = []
+        self.watch_list = []
 
         self.exit_broadcaster = lldb.SBBroadcaster('exit_broadcaster')
         self.event_loop = threading.Thread(target=event_loop, args=(self,))
@@ -205,12 +206,6 @@ class Context:
 
         self.call('cursor', line, column)
 
-    def goto_thread(self, thread_info):
-        if self.thread_guard():
-            for frame_info in thread_info['frames']:
-                if frame_info['type'] == 'full':
-                    self.goto_file(frame_info['file'], frame_info['line'], frame_info['column'])
-
     def is_window(self, name = ''):
         window = self.get_window()
         window_name = self.call('getwinvar', window, self.VIM_LLDB_WINDOW_KEY)
@@ -243,7 +238,11 @@ class Context:
             self.command('nnoremap <buffer> <CR> :call StackWindow_GotoFrame()<CR>')
         elif name == 'breakpoint':
             self.command('nnoremap <buffer> <CR> :call BreakpointWindow_GotoBreakpoint()<CR>')
-            self.command('nnoremap <buffer> <DEL> :call BreakpointWindow_DeleteBreakpoint()<CR>')
+            self.command('nnoremap <buffer> <DEL> :call BreakpointWindow_RemoveBreakpoint()<CR>')
+        elif name == 'watch':
+            self.command('nnoremap <buffer> ma :call WatchWindow_AddWatch()<CR>')
+            self.command('nnoremap <buffer> mm :call WatchWindow_ChangeWatch()<CR>')
+            self.command('nnoremap <buffer> md :call WatchWindow_RemoveWatch()<CR>')
 
     def destory_window(self, name = ''):
         while True:
@@ -279,23 +278,28 @@ class Context:
                         if self.process_info['state'] == 'exited':
                             self.call('setbufline', buffer, 1, 'processs exited')
                         else:
-                            thread_info = self.selected_thread_info or self.process_info['threads'][0]
-                            line = 1
-                            for frame_info in thread_info['frames']:
+                            for line, frame_info in enumerate(self.selected_thread_info['frames'], start=1):
                                 if frame_info['type'] == 'full':
                                     frame_line = f'{frame_info["function"]}  ({frame_info["file"]}:{frame_info["line"]})'
                                 else:
                                     frame_line = f'{frame_info["function"]}  ({frame_info["module"]})'
                                 self.call('setbufline', buffer, line, frame_line)
-                                line += 1
-                            self.call('setbufline', buffer, line, '')
-                            line += 1
-                            self.call('setbufline', buffer, line, f'thread {thread_info["id"]}')
+                            self.call('setbufline', buffer, len(self.selected_thread_info['frames']) + 1, '')
+                            self.call('setbufline', buffer, len(self.selected_thread_info['frames']) + 2, f'thread {self.selected_thread_info["id"]}')
                     elif name == 'breakpoint':
-                        line = 1
-                        for breakpoint in self.breakpoint_list:
+                        for line, breakpoint in enumerate(self.breakpoint_list, start=1):
                             self.call('setbufline', buffer, line, f'{breakpoint["file"]}:{breakpoint["line"]}')
-                            line += 1
+                    elif name == 'watch':
+                        for line, watch in enumerate(self.watch_list, start=1):
+                            if self.process_info['state'] == 'exited':
+                                self.call('setbufline', buffer, line, f'{watch}')
+                            else:
+                                frame = self.selected_thread_info['frames'][0]['handle']
+                                value = frame.EvaluateExpression(watch)
+                                if value.IsValid():
+                                    self.call('setbufline', buffer, line, f'{watch}  {value.GetValue()}')
+                                else:
+                                    self.call('setbufline', buffer, line, f'{watch}  (invalid)')
 
     def lock_files(self):
         window_count = self.get_window_count()
@@ -328,10 +332,14 @@ class Context:
             self.command('new')
             self.create_window('stack')
 
+            self.command('new')
+            self.create_window('watch')
+
             self.command(f'{window} wincmd w')
 
             self.update_window('stack')
             self.update_window('breakpoint')
+            self.update_window('watch')
 
     def select_target(self, selection = 0):
         if self.call('exists', 'g:vim_lldb_targets'):
@@ -518,6 +526,24 @@ class Context:
         else:
             self.log_error('No target selected')
 
+    def buffer_sync(self):
+        self.sync_signs(self.VIM_LLDB_SIGN_BREAKPOINT, self.breakpoint_list)
+        self.update_process_cursor()
+        if self.process_info['state'] != 'exited':
+            self.lock_files()
+
+    def breakpoint_sync_back(self):
+        if not self.is_window():
+            if self.sync_back_signs(self.VIM_LLDB_SIGN_BREAKPOINT, self.breakpoint_list):
+                self.update_window('breakpoint')
+
+
+    def goto_thread(self, thread_info):
+        if self.thread_guard():
+            for frame_info in thread_info['frames']:
+                if frame_info['type'] == 'full':
+                    self.goto_file(frame_info['file'], frame_info['line'], frame_info['column'])
+
     def stack_window_goto_frame(self):
         if self.process_info['state'] != 'exited':
             frame_index = self.get_line() - 1
@@ -546,7 +572,7 @@ class Context:
         breakpoint = self.breakpoint_list[breakpoint_index]
         self.goto_file(breakpoint['file'], breakpoint['line'], 0)
 
-    def breakpoint_window_delete_breakpoint(self):
+    def breakpoint_window_remove_breakpoint(self):
         breakpoint_index = self.get_line() - 1
         breakpoint = self.breakpoint_list[breakpoint_index]
         if self.selected_target['handle'].BreakpointDelete(breakpoint['id']):
@@ -556,18 +582,75 @@ class Context:
         else:
             self.log_error('Cannot remove breakpoint')
 
-    def buffer_sync(self):
-        self.sync_signs(self.VIM_LLDB_SIGN_BREAKPOINT, self.breakpoint_list)
-        self.update_process_cursor()
-        if self.process_info['state'] != 'exited':
-            self.lock_files()
+    def watch_window_add_watch(self):
+        expr = self.call('input', 'Please add watch expression:\n')
+        self.watch_list.append(expr)
+        self.update_window('watch')
 
-    def breakpoint_sync_back(self):
-        if not self.is_window():
-            if self.sync_back_signs(self.VIM_LLDB_SIGN_BREAKPOINT, self.breakpoint_list):
-                self.update_window('breakpoint')
+    def watch_window_change_watch(self):
+        if len(self.watch_list):
+            watch_index = self.get_line() - 1
+            expr = self.call('input', 'Please change watch expression:\n', self.watch_list[watch_index])
+            self.watch_list[watch_index] = expr
+            self.update_window('watch')
+
+    def watch_window_remove_watch(self):
+        if len(self.watch_list):
+            watch_index = self.get_line() - 1
+            del self.watch_list[watch_index]
+            self.update_window('watch')
 
 def event_loop(context):
+    def get_process_info(process):
+        process_state_dictionary = {
+            lldb.eStateInvalid: 'invalid',
+            lldb.eStateUnloaded: 'unloaded',
+            lldb.eStateConnected: 'connected',
+            lldb.eStateAttaching: 'attaching',
+            lldb.eStateLaunching: 'launching',
+            lldb.eStateStopped: 'stopped',
+            lldb.eStateRunning: 'running',
+            lldb.eStateStepping: 'stepping',
+            lldb.eStateCrashed: 'crashed',
+            lldb.eStateDetached: 'detached',
+            lldb.eStateExited: 'exited',
+            lldb.eStateSuspended: 'suspended',
+        }
+
+        process_info = {}
+        stopped_thread_info = None
+        process_info['state'] = process_state_dictionary[process.GetState()]
+        process_info['threads'] = []
+        for thread in process:
+            thread_info = {}
+            process_info['threads'].append(thread_info)
+
+            thread_info['handle'] = thread
+            thread_info['id'] = thread.GetIndexID()
+            thread_info['tid'] = thread.GetThreadID()
+
+            thread_info['frames'] = []
+            for frame in thread:
+                frame_info = {}
+                thread_info['frames'].append(frame_info)
+
+                frame_info['handle'] = frame
+                frame_info['module'] = frame.GetModule().GetFileSpec().fullpath or ''
+                frame_info['function'] = frame.GetDisplayFunctionName() or ''
+                frame_info['type'] = 'full' if frame.GetFunction().IsValid() else 'none'
+                if frame_info['type'] == 'full':
+                    line_entry = frame.GetLineEntry()
+                    frame_info['file'] = line_entry.GetFileSpec().fullpath or ''
+                    frame_info['line'] = line_entry.GetLine()
+                    frame_info['column'] = line_entry.GetColumn()
+                    if not os.path.isfile(frame_info['file']):
+                        frame_info['type'] = 'partial'
+
+            stop_reason = thread.GetStopReason() 
+            if stop_reason != lldb.eStopReasonNone:
+                stopped_thread_info = thread_info
+        return process_info, stopped_thread_info
+
     try:
         context.log_info(f'event thread id: {threading.current_thread().ident}')
         listener = context.debugger.GetListener()
@@ -583,67 +666,23 @@ def event_loop(context):
 
                         if state == lldb.eStateStopped:
                             context.process_info, context.selected_thread_info = get_process_info(process)
+                            context.selected_frames = [0] * len(context.process_info['threads'])
                             context.update_window('stack')
                             context.update_process_cursor()
+                            context.update_window('watch')
                             context.goto_thread(context.selected_thread_info)
-                        elif state == lldb.eStateRunning:
-                            pass
                         elif state == lldb.eStateExited:
                             context.process_info = context.EXITED_PROCESS_INFO
                             context.selected_thread_info = None
+                            context.selected_frames = []
                             context.update_window('stack')
                             context.update_process_cursor()
+                            context.update_window('watch')
                             context.unlock_files()
+                        elif state == lldb.eStateRunning:
+                            pass
                 elif event.BroadcasterMatchesRef(context.exit_broadcaster):
                     break
     except Exception:
         context.log_error(traceback.format_exc())
-
-def get_process_info(process):
-    process_state_dictionary = {
-        lldb.eStateInvalid: 'invalid',
-        lldb.eStateUnloaded: 'unloaded',
-        lldb.eStateConnected: 'connected',
-        lldb.eStateAttaching: 'attaching',
-        lldb.eStateLaunching: 'launching',
-        lldb.eStateStopped: 'stopped',
-        lldb.eStateRunning: 'running',
-        lldb.eStateStepping: 'stepping',
-        lldb.eStateCrashed: 'crashed',
-        lldb.eStateDetached: 'detached',
-        lldb.eStateExited: 'exited',
-        lldb.eStateSuspended: 'suspended',
-    }
-
-    process_info = {}
-    stopped_thread_info = None
-    process_info['state'] = process_state_dictionary[process.GetState()]
-    process_info['threads'] = []
-    for thread in process:
-        thread_info = {}
-        process_info['threads'].append(thread_info)
-
-        thread_info['id'] = thread.GetIndexID()
-        thread_info['tid'] = thread.GetThreadID()
-
-        thread_info['frames'] = []
-        for frame in thread:
-            frame_info = {}
-            thread_info['frames'].append(frame_info)
-
-            frame_info['module'] = frame.GetModule().GetFileSpec().fullpath or ''
-            frame_info['function'] = frame.GetDisplayFunctionName() or ''
-            frame_info['type'] = 'full' if frame.GetFunction().IsValid() else 'none'
-            if frame_info['type'] == 'full':
-                line_entry = frame.GetLineEntry()
-                frame_info['file'] = line_entry.GetFileSpec().fullpath or ''
-                frame_info['line'] = line_entry.GetLine()
-                frame_info['column'] = line_entry.GetColumn()
-                if not os.path.isfile(frame_info['file']):
-                    frame_info['type'] = 'partial'
-
-        stop_reason = thread.GetStopReason() 
-        if stop_reason != lldb.eStopReasonNone:
-            stopped_thread_info = thread_info
-    return process_info, stopped_thread_info
 

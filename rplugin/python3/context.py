@@ -17,6 +17,7 @@ import lldb
 # relationship between SBSymbol, SBModule, SBSymbolContext
 # differences between all the step functions
 # Why does StepInto not fail
+# Any case where MightHaveChildren returns True but acutal children number is 0?
 
 # TODO
 # Investigate wrong frame information, image lookup --verbose --address <pc>
@@ -91,11 +92,11 @@ class Context:
                     # NOTE: echoerr seems to be treated as throwing error
                     self.command(f'echohl ErrorMsg')
                     self.command(f'echomsg {line}')
-                    self.command(f'echohl NormalNC')
+                    self.command(f'echohl Normal')
             else:
                 self.command(f'echohl ErrorMsg')
                 self.command(f'echomsg {repr(value)}')
-                self.command(f'echohl NormalNC')
+                self.command(f'echohl Normal')
 
     def get_window(self):
         return self.call('winnr')
@@ -123,6 +124,15 @@ class Context:
 
     def get_line_count(self):
         return self.call('line', '$')
+
+    def get_column(self):
+        return self.call('col', '.')
+
+    def get_column_count(self):
+        return self.call('col', '$')
+
+    def set_line_column(self, line, column):
+        self.call('cursor', line, column)
 
     def get_buffer_file(self, buffer = 0):
         buffer = buffer or self.get_buffer()
@@ -204,7 +214,7 @@ class Context:
             edit_file = os.path.relpath(file)
             self.command(f'edit {edit_file}')
 
-        self.call('cursor', line, column)
+        self.set_line_column(line, column)
 
     def is_window(self, name = ''):
         window = self.get_window()
@@ -227,6 +237,7 @@ class Context:
         self.call('setwinvar', window, '&buftype', 'nofile')
         self.call('setwinvar', window, '&buflisted', 0)
         self.call('setwinvar', window, '&bufhidden', 'wipe')
+        self.call('setwinvar', window, '&swapfile', 0)
         self.call('setwinvar', window, '&number', 0)
         self.call('setwinvar', window, '&ruler', 0)
         self.call('setwinvar', window, '&wrap', 0)
@@ -238,11 +249,13 @@ class Context:
             self.command('nnoremap <buffer> <CR> :call StackWindow_GotoFrame()<CR>')
         elif name == 'breakpoint':
             self.command('nnoremap <buffer> <CR> :call BreakpointWindow_GotoBreakpoint()<CR>')
-            self.command('nnoremap <buffer> <DEL> :call BreakpointWindow_RemoveBreakpoint()<CR>')
+            self.command('nnoremap <buffer> md :call BreakpointWindow_RemoveBreakpoint()<CR>')
         elif name == 'watch':
             self.command('nnoremap <buffer> ma :call WatchWindow_AddWatch()<CR>')
             self.command('nnoremap <buffer> mm :call WatchWindow_ChangeWatch()<CR>')
             self.command('nnoremap <buffer> md :call WatchWindow_RemoveWatch()<CR>')
+            self.command('nnoremap <buffer> o :call WatchWindow_ExpandWatch()<CR>')
+            self.command('nnoremap <buffer> x :call WatchWindow_CollapseWatch()<CR>')
 
     def destory_window(self, name = ''):
         while True:
@@ -259,8 +272,51 @@ class Context:
                 break
 
     def update_window(self, name):
+        def get_stack_window_lines():
+            lines = []
+            if self.process_info['state'] == 'exited':
+                lines.append({ 'text': 'process exited' })
+            else:
+                selected_frame_info = self.get_selected_frame_info()
+                for line, frame_info in enumerate(self.selected_thread_info['frames'], start=1):
+                    if frame_info['type'] == 'full':
+                        line = { 'text': f'{frame_info["function"]}  ({frame_info["file"]}:{frame_info["line"]})' }
+                        if frame_info == selected_frame_info:
+                            line['text'] += '  *'
+                    else:
+                        line = { 'text': f'{frame_info["function"]}  ({frame_info["module"]})'}
+                    lines.append(line)
+                lines.append({ 'text': '' })
+                lines.append({ 'text': f'thread {self.selected_thread_info["id"]}' })
+            return lines
+
+        def get_breakpoint_window_lines():
+            lines = []
+            for breakpoint in self.breakpoint_list:
+                lines.append({'text': f'{breakpoint["file"]}:{breakpoint["line"]}' })
+            return lines
+
+        def get_watch_window_lines():
+            lines = []
+            def add_watch_list_lines(watch_list, depth):
+                indent = '  ' * depth
+                for watch in watch_list:
+                    if watch['value'].MightHaveChildren():
+                        if len(watch['children']):
+                            lines.append({ 'text': f'{indent}{watch["expr"]}' })
+                            add_watch_list_lines(watch['children'], depth + 1)
+                        else:
+                            lines.append({ 'text': f'{indent}{watch["expr"]}  ...' })
+                    else:
+                        lines.append({ 'text': f'{indent}{watch["expr"]}  {watch["value"].GetValue()}' })
+            add_watch_list_lines(self.watch_list, 0)
+            return lines
+
         @contextmanager
-        def writable(window):
+        def writing(window):
+            saved_line = self.get_line()
+            saved_column = self.get_column()
+
             self.call('setwinvar', window, '&readonly', 0)
             self.call('setwinvar', window, '&modifiable', 1)
             yield
@@ -268,41 +324,21 @@ class Context:
             self.call('setwinvar', window, '&modifiable', 0)
             self.call('setwinvar', window, '&modified', 0)
 
+            self.set_line_column(saved_line, saved_column)
+
         window = self.check_window_exists(name)
         if window:
-            with writable(window):
+            if name == 'stack':
+                lines = get_stack_window_lines()
+            elif name == 'breakpoint':
+                lines = get_breakpoint_window_lines()
+            elif name == 'watch':
+                lines = get_watch_window_lines()
+            with writing(window):
                 buffer = self.call('winbufnr', window)
                 self.call('deletebufline', buffer, 1, '$')
-                if name == 'stack':
-                    if self.process_info['state'] == 'exited':
-                        self.call('setbufline', buffer, 1, 'processs exited')
-                    else:
-                        selected_thread_index = self.process_info['threads'].index(self.selected_thread_info)
-                        selected_frame_info = self.selected_frame_info_list[selected_thread_index]
-                        for line, frame_info in enumerate(self.selected_thread_info['frames'], start=1):
-                            if frame_info['type'] == 'full':
-                                frame_line = f'{"*" if frame_info == selected_frame_info else " "} {frame_info["function"]}  ({frame_info["file"]}:{frame_info["line"]})'
-                            else:
-                                frame_line = f'  {frame_info["function"]}  ({frame_info["module"]})'
-                            self.call('setbufline', buffer, line, frame_line)
-                        self.call('setbufline', buffer, len(self.selected_thread_info['frames']) + 1, '')
-                        self.call('setbufline', buffer, len(self.selected_thread_info['frames']) + 2, f'thread {self.selected_thread_info["id"]}')
-                elif name == 'breakpoint':
-                    for line, breakpoint in enumerate(self.breakpoint_list, start=1):
-                        self.call('setbufline', buffer, line, f'{breakpoint["file"]}:{breakpoint["line"]}')
-                elif name == 'watch':
-                    for line, watch in enumerate(self.watch_list, start=1):
-                        if self.process_info['state'] == 'exited':
-                            self.call('setbufline', buffer, line, f'{watch}')
-                        else:
-                            selected_thread_index = self.process_info['threads'].index(self.selected_thread_info)
-                            selected_frame_info = self.selected_frame_info_list[selected_thread_index]
-                            if selected_frame_info and selected_frame_info['type'] == 'full':
-                                frame = selected_frame_info['handle']
-                                value = frame.EvaluateExpression(watch)
-                                self.call('setbufline', buffer, line, f'{watch}  {value.GetValue()}')
-                            else:
-                                self.call('setbufline', buffer, line, f'{watch}')
+                for line_index, line in enumerate(lines, start=1):
+                    self.call('setbufline', buffer, line_index, line['text'])
 
     def lock_files(self):
         window_count = self.get_window_count()
@@ -321,27 +357,20 @@ class Context:
                 self.call('setwinvar', window, '&modifiable', 1)
                 
     def toggle_debugger(self):
-        window = self.get_window()
-
         if self.check_window_exists():
             self.destory_window()
         else:
             window = self.get_window()
-
             self.command('vnew')
             self.create_window('breakpoint')
-
-            self.command('new')
-            self.create_window('stack')
-
+            self.update_window('breakpoint')
             self.command('new')
             self.create_window('watch')
-
-            self.command(f'{window} wincmd w')
-
-            self.update_window('stack')
-            self.update_window('breakpoint')
             self.update_window('watch')
+            self.command('new')
+            self.create_window('stack')
+            self.update_window('stack')
+            self.command(f'{window} wincmd w')
 
     def select_target(self, selection = 0):
         if self.call('exists', 'g:vim_lldb_targets'):
@@ -514,7 +543,7 @@ class Context:
                         self.log_error('Cannot remove breakpoint')
             else:
                 if self.process_info['state'] == 'exited':
-                    self.breakpoint_list.append({ 'file': file, 'line': line })
+                    self.breakpoint_list.append({ 'file': file, 'line': line, 'id': None })
                 else:
                     breakpoint = self.selected_target['handle'].BreakpointCreateByLocation(file, line)
                     if breakpoint.IsValid():
@@ -538,10 +567,16 @@ class Context:
             if self.sync_back_signs(self.VIM_LLDB_SIGN_BREAKPOINT, self.breakpoint_list):
                 self.update_window('breakpoint')
 
-    def goto_selected_frame(self):
-        if self.process_info['state'] != 'exited':
+    def get_selected_frame_info(self):
+        if self.selected_thread_info:
             selected_thread_index = self.process_info['threads'].index(self.selected_thread_info)
             selected_frame_info = self.selected_frame_info_list[selected_thread_index]
+            return selected_frame_info
+        return None
+
+    def goto_selected_frame(self):
+        if self.process_info['state'] != 'exited':
+            selected_frame_info = self.get_selected_frame_info()
             if selected_frame_info and selected_frame_info['type'] == 'full':
                 self.goto_file(selected_frame_info['file'], selected_frame_info['line'], selected_frame_info['column'])
 
@@ -583,30 +618,106 @@ class Context:
     def breakpoint_window_remove_breakpoint(self):
         breakpoint_index = self.get_line() - 1
         breakpoint = self.breakpoint_list[breakpoint_index]
-        if self.selected_target['handle'].BreakpointDelete(breakpoint['id']):
+        if self.process_info['state'] == 'exited':
             self.breakpoint_list.remove(breakpoint)
             self.update_window('breakpoint')
-            self.sync_signs(self.VIM_LLDB_SIGN_BREAKPOINT, self.breakpoint_list)
         else:
-            self.log_error('Cannot remove breakpoint')
+            if self.selected_target['handle'].BreakpointDelete(breakpoint['id']):
+                self.breakpoint_list.remove(breakpoint)
+                self.update_window('breakpoint')
+                self.sync_signs(self.VIM_LLDB_SIGN_BREAKPOINT, self.breakpoint_list)
+            else:
+                self.log_error('Cannot remove breakpoint')
 
+    def get_watch(self, line = 0):
+        if not line:
+            line = self.get_line()
+        found_watch = None
+        def find_watch(watch_list, offset):
+            nonlocal found_watch
+            for watch in watch_list:
+                if offset == line:
+                    found_watch = watch
+                if len(watch['children']):
+                    offset = find_watch(watch['children'], offset + 1)
+                else:
+                    offset += 1
+            return offset
+        find_watch(self.watch_list, 1)
+        return found_watch
+
+    def evaluate_expr(self, expr):
+        frame = self.get_selected_frame_info()['handle']
+        if re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$').match(expr):
+            value = frame.FindVariable(expr)
+        else:
+            value = frame.EvaluateExpression(expr)
+        watch = { 'expr': expr, 'value': value, 'children': [], 'parent': None }
+        return watch
+
+    def evaluate_watch_list(self):
+        pass
     def watch_window_add_watch(self):
-        expr = self.call('input', 'Please add watch expression:\n')
-        self.watch_list.append(expr)
-        self.update_window('watch')
+        if self.process_info['state'] != 'exited':
+            expr = self.call('input', 'Please add watch expression:\n')
+            if expr:
+                watch = self.evaluate_expr(expr)
+                self.watch_list.append(watch)
+                self.update_window('watch')
+                self.set_line_column(self.get_line_count(), 0)
+        else:
+            self.log_error('Cannot modify watch window from exited state')
 
     def watch_window_change_watch(self):
-        if len(self.watch_list):
-            watch_index = self.get_line() - 1
-            expr = self.call('input', 'Please change watch expression:\n', self.watch_list[watch_index])
-            self.watch_list[watch_index] = expr
-            self.update_window('watch')
+        if self.process_info['state'] != 'exited':
+            if len(self.watch_list):
+                watch = self.get_watch()
+                if watch['parent']:
+                    self.log_error('Cannot change non-root expression')
+                else:
+                    expr = self.call('input', 'Please change watch expression:\n')
+                    if expr:
+                        new_watch = self.evaluate_expr(expr)
+                        watch_index = self.watch_list.index(watch)
+                        self.watch_list[watch_index] = new_watch
+                        self.update_window('watch')
+        else:
+            self.log_error('Cannot modify watch window from exited state')
 
     def watch_window_remove_watch(self):
-        if len(self.watch_list):
-            watch_index = self.get_line() - 1
-            del self.watch_list[watch_index]
-            self.update_window('watch')
+        if self.process_info['state'] != 'exited':
+            if len(self.watch_list):
+                watch = self.get_watch()
+                while watch['parent']:
+                    watch = watch['parent']
+                self.watch_list.remove(watch)
+                self.update_window('watch')
+        else:
+            self.log_error('Cannot modify watch window from exited state')
+
+    def watch_window_expand_watch(self):
+        if self.process_info['state'] != 'exited':
+            watch = self.get_watch()
+            value = watch['value']
+            if not len(watch['children']) and value.MightHaveChildren():
+                children = [value.GetChildAtIndex(index) for index in range(value.GetNumChildren())]
+                children = list(map(lambda v: { 'expr': v.GetName(), 'value': v, 'children': [], 'parent': watch }, children))
+                watch['children'] = children
+                self.update_window('watch')
+        else:
+            self.log_error('Cannot modify watch window from exited state')
+
+    def watch_window_collapse_watch(self):
+        if self.process_info['state'] != 'exited':
+            watch = self.get_watch()
+            if not len(watch['children']) and watch['parent']:
+                watch = watch['parent']
+            self.log_info(f'watch expr = {watch["expr"]}')
+            if len(watch['children']):
+                watch['children'] = []
+                self.update_window('watch')
+        else:
+            self.log_error('Cannot modify watch window from exited state')
 
     def handle_process_stopped(self, process_info, stopped_thread_info):
         def get_top_frame(thread_info):
@@ -619,8 +730,9 @@ class Context:
             self.process_info = process_info
             self.selected_thread_info = stopped_thread_info
             self.selected_frame_info_list = [get_top_frame(thread_info) for thread_info in process_info['threads']]
-            self.update_window('stack')
+            self.evaluate_watch_list()
             self.update_window('watch')
+            self.update_window('stack')
             self.update_process_cursor()
             self.goto_selected_frame()
 
@@ -630,7 +742,6 @@ class Context:
             self.selected_thread_info = None
             self.selected_frame_info_list = []
             self.update_window('stack')
-            self.update_window('watch')
             self.update_process_cursor()
             self.unlock_files()
 

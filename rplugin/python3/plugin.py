@@ -84,6 +84,14 @@ class Handler(object):
     def watch_window_remove_watch(self, args):
         self.context.watch_window_remove_watch()
 
+    @pynvim.function('WatchWindow_ExpandWatch')
+    def watch_window_expand_watch(self, args):
+        self.context.watch_window_expand_watch()
+
+    @pynvim.function('WatchWindow_CollapseWatch')
+    def watch_window_collapse_watch(self, args):
+        self.context.watch_window_collapse_watch()
+
     @pynvim.autocmd('BufEnter')
     def buffer_sync(self):
         # NOTE: BufEnter is called on vim startup, initialize here

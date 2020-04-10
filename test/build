@@ -1,0 +1,4 @@
+#!/usr/bin/env fish
+
+clang++ -g -O0 -o test/main test/main.cpp
+

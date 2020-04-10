@@ -1,6 +1,4 @@
 __pycache__
-*.pyc
 .vimqf
-bin
-test
+test/main
 

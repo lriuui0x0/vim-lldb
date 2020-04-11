@@ -21,11 +21,13 @@ import lldb
 # TODO
 # Re-evaluate watch expressions
 # Figure out running state
+# matchdelete in nvim https://github.com/neovim/neovim/issues/12110
 # Investigate wrong frame information, image lookup --verbose --address <pc>
 
 class Context:
     VIM_LLDB_WINDOW_KEY = 'vim_lldb'
     VIM_LLDB_WINDOW_LOCK = 'vim_lldb_window_lock'
+    VIM_LLDB_WINDOW_MATCH = 'vim_lldb_window_match'
     VIM_LLDB_SIGN_BREAKPOINT = 'vim_lldb_sign_breakpoint'
     VIM_LLDB_SIGN_CURSOR = 'vim_lldb_sign_cursor'
     EXITED_PROCESS_INFO = { 'state': 'exited', 'threads': [] }
@@ -33,7 +35,6 @@ class Context:
     def __init__(self, nvim):
         self.nvim = nvim
         self.tid = threading.current_thread().ident
-        self.log_info(f'main thread id: {self.tid}')
 
         self.sign_id = 0
         self.command(f'highlight {self.VIM_LLDB_SIGN_BREAKPOINT}_HIGHLIGHT guifg=red')
@@ -287,7 +288,7 @@ class Context:
                         if frame_info == selected_frame_info:
                             line['text'] += '  *'
                     else:
-                        line = { 'text': f'{frame_info["function"]}  ({frame_info["module"]})'}
+                        line = { 'text': f'{frame_info["function"]}  ({frame_info["module"]})', 'highlight': 'invalid' }
                     lines.append(line)
                 lines.append({ 'text': '' })
                 lines.append({ 'text': f'thread {self.selected_thread_info["id"]}' })
@@ -338,10 +339,25 @@ class Context:
             elif name == 'watch':
                 lines = get_watch_window_lines()
             with writing(window):
+                window_matches = self.call('getwinvar', window, self.VIM_LLDB_WINDOW_MATCH)
+                if window_matches:
+                    for match in window_matches:
+                        self.call('matchdelete', match, window)
+                window_matches = []
+
                 buffer = self.call('winbufnr', window)
                 self.call('deletebufline', buffer, 1, '$')
                 for line_index, line in enumerate(lines, start=1):
                     self.call('setbufline', buffer, line_index, line['text'])
+                    if 'highlight' in line:
+                        highlight_dictionary = {
+                            'invalid': 'Comment'
+                        }
+                        # match_id = self.call('matchaddpos', highlight_dictionary[line['highlight']], [line_index], -1, -1, { 'window': window })
+                        # window_matches.append(match_id)
+
+                self.log_info(window_matches)
+                self.call('setwinvar', window, self.VIM_LLDB_WINDOW_MATCH, window_matches)
 
     def lock_files(self):
         window_count = self.get_window_count()
@@ -707,7 +723,6 @@ class Context:
             watch = self.get_watch()
             if not len(watch['children']) and watch['parent']:
                 watch = watch['parent']
-            self.log_info(f'watch expr = {watch["expr"]}')
             if len(watch['children']):
                 watch['children'] = []
                 self.update_window('watch')
@@ -792,7 +807,6 @@ def event_loop(context):
         return process_info, stopped_thread_info
 
     try:
-        context.log_info(f'event thread id: {threading.current_thread().ident}')
         listener = context.debugger.GetListener()
         listener.StartListeningForEvents(context.exit_broadcaster, 0xffffffff)
         while True:

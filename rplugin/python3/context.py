@@ -7,7 +7,6 @@ from contextlib import contextmanager
 import lldb
 
 # TODO
-# Ask Greg:
 # resource management (e.g. SBTarget), error handling (SBError vs IsValid), Python C++ interface
 # multiple processes per target?
 # passing string (and other elements) through API
@@ -20,6 +19,8 @@ import lldb
 # Any case where MightHaveChildren returns True but acutal children number is 0?
 
 # TODO
+# Re-evaluate watch expressions
+# Figure out running state
 # Investigate wrong frame information, image lookup --verbose --address <pc>
 
 class Context:
@@ -45,7 +46,7 @@ class Context:
 
         self.targets = []
         self.selected_target = None
-        self.select_target(0)
+        self.select_target()
 
         self.process_info = self.EXITED_PROCESS_INFO
         self.selected_thread_info = None
@@ -246,16 +247,18 @@ class Context:
         self.call('setwinvar', window, self.VIM_LLDB_WINDOW_KEY, name)
 
         if name == 'stack':
-            self.command('nnoremap <buffer> <CR> :call StackWindow_GotoFrame()<CR>')
+            self.command('nnoremap <buffer> <CR> :call VimLLDB_StackWindow_GotoFrame()<CR>')
+            self.command('nnoremap <buffer> <C-n> :call StackWindow_NextThread()<CR>')
+            self.command('nnoremap <buffer> <C-p> :call StackWindow_PrevThread()<CR>')
         elif name == 'breakpoint':
-            self.command('nnoremap <buffer> <CR> :call BreakpointWindow_GotoBreakpoint()<CR>')
-            self.command('nnoremap <buffer> md :call BreakpointWindow_RemoveBreakpoint()<CR>')
+            self.command('nnoremap <buffer> <CR> :call VimLLDB_BreakpointWindow_GotoBreakpoint()<CR>')
+            self.command('nnoremap <buffer> md :call VimLLDB_BreakpointWindow_RemoveBreakpoint()<CR>')
         elif name == 'watch':
-            self.command('nnoremap <buffer> ma :call WatchWindow_AddWatch()<CR>')
-            self.command('nnoremap <buffer> mm :call WatchWindow_ChangeWatch()<CR>')
-            self.command('nnoremap <buffer> md :call WatchWindow_RemoveWatch()<CR>')
-            self.command('nnoremap <buffer> o :call WatchWindow_ExpandWatch()<CR>')
-            self.command('nnoremap <buffer> x :call WatchWindow_CollapseWatch()<CR>')
+            self.command('nnoremap <buffer> ma :call VimLLDB_WatchWindow_AddWatch()<CR>')
+            self.command('nnoremap <buffer> mm :call VimLLDB_WatchWindow_ChangeWatch()<CR>')
+            self.command('nnoremap <buffer> md :call VimLLDB_WatchWindow_RemoveWatch()<CR>')
+            self.command('nnoremap <buffer> o :call VimLLDB_WatchWindow_ExpandWatch()<CR>')
+            self.command('nnoremap <buffer> x :call VimLLDB_WatchWindow_CollapseWatch()<CR>')
 
     def destory_window(self, name = ''):
         while True:
@@ -356,6 +359,33 @@ class Context:
                 self.call('setwinvar', window, '&readonly', 0)
                 self.call('setwinvar', window, '&modifiable', 1)
                 
+    def select_target(self, selection = 0):
+        if self.call('exists', 'g:vim_lldb_targets'):
+            targets = self.call('eval', 'g:vim_lldb_targets')
+        else:
+            self.log_error('No target definition')
+            return
+
+        if type(targets) == list and all(map(lambda target: type(target) == dict and set(target) == { 'name', 'executable', 'arguments', 'working_dir', 'environments' }, targets)):
+            self.targets = targets
+        else:
+            self.log_error('Incorrect target format')
+            return
+
+        if type(selection) == int:
+            if selection >= 0 and selection < len(self.targets):
+                self.selected_target = self.targets[selection]
+            else:
+                self.log_error('Target index out of bound')
+        elif type(selection) == str:
+            matched_targets = [target for target in self.targets if target.name == selection]
+            if len(matched_targets) == 1:
+                self.selected_target = matched_targets
+            else:
+                self.log_error('Target name not found' if len(matched_targets) == 0 else 'Ambiguous target name')
+        else:
+            self.log_error('Invalid target selection')
+
     def toggle_debugger(self):
         if self.check_window_exists():
             self.destory_window()
@@ -371,41 +401,6 @@ class Context:
             self.create_window('stack')
             self.update_window('stack')
             self.command(f'{window} wincmd w')
-
-    def select_target(self, selection = 0):
-        if self.call('exists', 'g:vim_lldb_targets'):
-            targets = self.call('eval', 'g:vim_lldb_targets')
-        else:
-            self.log_error('No target definition')
-            return False
-        self.targets = []
-        if type(targets) == list:
-            for target in targets:
-                if (type(target) == dict and set(target) == {'name', 'executable', 'arguments', 'working_dir', 'environments'}):
-                    self.targets.append(target)
-                else:
-                    self.log_error('Incorrect target format')
-                    return False
-
-        self.selected_target = None
-        if type(selection) == int:
-            if selection >= 0 and selection < len(self.targets):
-                self.selected_target = self.targets[selection].copy()
-            else:
-                self.log_error('Target index out of bound')
-                return False
-        elif type(selection) == str:
-            matched_targets = [target for target in self.targets if target.name == selection]
-            if len(matched_targets) == 1:
-                self.selected_target = matched_targets.copy()
-            else:
-                self.log_error('Target name not found' if len(matched_targets) == 0 else 'Ambiguous target name')
-                return False
-        else:
-            self.log_error('Invalid target selection')
-            return False
-
-        return True
 
     def launch(self):
         if self.selected_target:
@@ -491,7 +486,7 @@ class Context:
         else:
             self.log_error('No target selected')
 
-    def stop(self):
+    def pause(self):
         if self.selected_target:
             if self.process_info['state'] == 'running':
                 process = self.selected_target['handle'].GetProcess()
@@ -499,7 +494,7 @@ class Context:
                 if error.Fail():
                     self.log_error(error.GetCString())
             else:
-                self.log_error('Cannot stop from non-running state')
+                self.log_error('Cannot pause from non-running state')
         else:
             self.log_error('No target selected')
 

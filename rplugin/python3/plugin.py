@@ -12,83 +12,83 @@ class Handler(object):
         self.started = False
         self.context = None
 
-    @pynvim.function('ToggleDebugger')
+    @pynvim.function('VimLLDB_SelectTarget')
+    def select_target(self, args):
+        self.context.select_target(args[0])
+
+    @pynvim.function('VimLLDB_ToggleDebugger')
     def toggle_debugger(self, args):
         self.context.toggle_debugger()
 
-    @pynvim.function('SelectTarget')
-    def select_target(self, args):
-        self.context.select_target()
-
-    @pynvim.function('Launch')
+    @pynvim.function('VimLLDB_Launch')
     def launch(self, args):
         self.context.launch()
 
-    @pynvim.function('StepOver')
+    @pynvim.function('VimLLDB_StepOver')
     def step_over(self, args):
         self.context.step_over()
 
-    @pynvim.function('StepInto')
+    @pynvim.function('VimLLDB_StepInto')
     def step_into(self, args):
         self.context.step_into()
 
-    @pynvim.function('StepOut')
+    @pynvim.function('VimLLDB_StepOut')
     def step_out(self, args):
         self.context.step_out()
 
-    @pynvim.function('Resume')
+    @pynvim.function('VimLLDB_Resume')
     def resume(self, args):
         self.context.resume()
 
-    @pynvim.function('Stop')
+    @pynvim.function('VimLLDB_Pause')
     def stop(self, args):
-        self.context.stop()
+        self.context.pause()
 
-    @pynvim.function('Kill')
+    @pynvim.function('VimLLDB_Kill')
     def kill(self, args):
         self.context.kill()
 
-    @pynvim.function('ToggleBreakpoint')
+    @pynvim.function('VimLLDB_ToggleBreakpoint')
     def toggle_breakpoint(self, args):
         self.context.toggle_breakpoint()
 
-    @pynvim.function('StackWindow_GotoFrame')
+    @pynvim.function('VimLLDB_StackWindow_GotoFrame')
     def stack_window_goto_frame(self, args):
         self.context.stack_window_goto_frame()
 
-    @pynvim.function('StackWindow_NextThread')
+    @pynvim.function('VimLLDB_StackWindow_NextThread')
     def stack_window_next_thread(self, args):
         self.context.stack_window_next_thread()
 
-    @pynvim.function('StackWindow_PrevThread')
+    @pynvim.function('VimLLDB_StackWindow_PrevThread')
     def stack_window_prev_thread(self, args):
         self.context.stack_window_prev_thread()
 
-    @pynvim.function('BreakpointWindow_GotoBreakpoint')
+    @pynvim.function('VimLLDB_BreakpointWindow_GotoBreakpoint')
     def breakpoint_window_goto_breakpoint(self, args):
         self.context.breakpoint_window_goto_breakpoint()
 
-    @pynvim.function('BreakpointWindow_RemoveBreakpoint')
+    @pynvim.function('VimLLDB_BreakpointWindow_RemoveBreakpoint')
     def breakpoint_window_remove_breakpoint(self, args):
         self.context.breakpoint_window_remove_breakpoint()
 
-    @pynvim.function('WatchWindow_AddWatch')
+    @pynvim.function('VimLLDB_WatchWindow_AddWatch')
     def watch_window_add_watch(self, args):
         self.context.watch_window_add_watch()
 
-    @pynvim.function('WatchWindow_ChangeWatch')
+    @pynvim.function('VimLLDB_WatchWindow_ChangeWatch')
     def watch_window_change_watch(self, args):
         self.context.watch_window_change_watch()
 
-    @pynvim.function('WatchWindow_RemoveWatch')
+    @pynvim.function('VimLLDB_WatchWindow_RemoveWatch')
     def watch_window_remove_watch(self, args):
         self.context.watch_window_remove_watch()
 
-    @pynvim.function('WatchWindow_ExpandWatch')
+    @pynvim.function('VimLLDB_WatchWindow_ExpandWatch')
     def watch_window_expand_watch(self, args):
         self.context.watch_window_expand_watch()
 
-    @pynvim.function('WatchWindow_CollapseWatch')
+    @pynvim.function('VimLLDB_WatchWindow_CollapseWatch')
     def watch_window_collapse_watch(self, args):
         self.context.watch_window_collapse_watch()
 

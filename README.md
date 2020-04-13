@@ -17,7 +17,7 @@ This is a LLDB debugger plugin for Neovim. It's currently in a very early stage,
 - [`Neovim`](https://github.com/neovim/neovim) with python3 enabled, [`pynvim`](https://github.com/neovim/pynvim) installed
 - LLDB wth python3 package enabled, you may need to compile LLDB from source with the following `cmake` arguments:
     - `-DLLDB_ENABLE_PYTHON=1`
-    - `-DPYTHON_LIBRARIES=<path to python3 dynamic-link library>`
+    - `-DPYTHON_LIBRARIES=<path to python3 library>`
     - `-DPYTHON_INCLUDE_DIRS=<path to the directory containing Python.h>`
 - Install this plugin with your vim plugin manager, you need to run `:UpdateRemotePlugins` after the plugin is installed
     - If you use [`vim-plug`](https://github.com/junegunn/vim-plug), you can use single line

@@ -44,7 +44,7 @@ Below is the list of functions available:
 
 - `VimLLDB_ToggleDebugger()`
 
-    Toggle the debugger view, which includes a stack window, watch window, and a breakpoint window.
+    Toggle the debugger view, which includes a stack window, watch window, and a breakpoint window. The windows and layout aren't configurable at the moment.
 
 - `VimLLDB_Launch()`
 

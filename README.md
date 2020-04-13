@@ -9,6 +9,8 @@ This is a LLDB debugger plugin for Neovim. It's currently in a very early stage,
 - Breakpoint toggle / window
 - Multi-thread stack window
 - Watch window
+    - View pointer as array using `pointer@length` or `pointer@offset,length` syntax
+    - View register using `$rax` syntax
 
 ## Installation
 

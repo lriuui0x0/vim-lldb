@@ -352,8 +352,7 @@ class Context:
                             lines.append({ 'text': f'{indent}{watch["expr"]}' })
                     else:
                         lines.append({ 'text': f'{indent}{watch["expr"]}' })
-                        if watch['children']:
-                            add_watch_list_lines(watch['children'], depth + 1)
+                        add_watch_list_lines(watch['children'], depth + 1)
             add_watch_list_lines(self.watch_list, 0)
             return lines
 
@@ -724,48 +723,47 @@ class Context:
         return found_watch
 
     def evaluate_expr(self, expr):
+        watch = { 'expr': expr, 'children': [], 'parent': None }
         if self.process_info['state'] == 'stopped':
-            frame = self.get_selected_frame_info()['handle']
-            # NOTE: Do not evaluate expression if the expression is variable-like to avoid parsing overhead
-            if re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$').match(expr):
-                value = frame.FindVariable(expr)
+            expr_list = expr.split('@')
+            if len(expr_list) > 2:
+                watch['value'] = None
             else:
-                # NOTE: GetValueForVariablePath handles simple field accessor expressions (-> . * & [])
-                value = frame.GetValueForVariablePath(expr)
-                if not value.IsValid():
-                    value = frame.EvaluateExpression(expr)
+                expr = expr_list[0]
+                frame = self.get_selected_frame_info()['handle']
+                # NOTE: Do not evaluate expression if the expression is variable-like to avoid parsing overhead
+                if re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$').match(expr):
+                    watch['value'] = frame.FindVariable(expr)
+                else:
+                    # NOTE: GetValueForVariablePath handles simple field accessor expressions (-> . * & [])
+                    watch['value'] = frame.GetValueForVariablePath(expr)
+                    if not value.IsValid():
+                        watch['value'] = frame.EvaluateExpression(expr)
+
+                if len(expr_list) > 1:
+                    comma_list = expr_list[1].split(',')
+                    try:
+                        if len(comma_list) == 2:
+                            offset = int(comma_list[0])
+                            length = int(comma_list[1])
+                            if offset >= 0 and length > 0:
+                                watch['special'] = { 'type': 'at', 'offset': offset, 'length': length }
+                            else:
+                                watch['value'] = None
+                        elif len(comma_list) == 1:
+                            length = int(comma_list[0])
+                            if length > 0:
+                                watch['special'] = { 'type': 'at', 'offset': 0, 'length': length }
+                            else:
+                                watch['value'] = None
+                        else:
+                            watch['value'] = None
+                    except ValueError:
+                        watch['value'] = None
         else:
             # NOTE: We return None here instead of raising error since we want to be able to modify the watch window from exited state. This simplifies the caller
-            value = None
-        return { 'expr': expr, 'value': value, 'children': [], 'parent': None }
-
-    # NOTE: Reevaluation maintains the watch expanded/collapsed structure as long as possible
-    def reevaluate_watch_list(self):
-        def expand_children(watch, curr_children):
-            value = watch['value']
-            if curr_children and value.MightHaveChildren():
-                children = [value.GetChildAtIndex(index) for index in range(value.GetNumChildren())]
-                children = list(map(lambda v: { 'expr': v.GetName(), 'value': v, 'children': [], 'parent': watch }, children))
-                watch['children'] = children
-
-                for child in watch['children']:
-                    match_child = None
-                    for curr_child in curr_children:
-                        if curr_child['expr'] == child['expr']:
-                            match_child = curr_child
-                            break
-                    # NOTE: We want to expand child if the same name is expanded in the current watch structure
-                    if match_child:
-                        expand_children(child, match_child['children'])
-            else:
-                watch['children'] = []
-
-        if self.process_info['state'] == 'stopped':
-            for watch in self.watch_list:
-                curr_children = watch['children']
-                new_watch = self.evaluate_expr(watch['expr'])
-                list_replace(self.watch_list, watch, new_watch)
-                expand_children(new_watch, curr_children)
+            watch['value'] = None
+        return watch
 
     def watch_window_add_watch(self):
         if self.process_info['state'] != 'running':
@@ -805,21 +803,37 @@ class Context:
         else:
             self.log_error('Cannot modify watch window from running state')
 
+    def get_watch_children(self, watch):
+        value = watch['value']
+        if value and value.IsValid():
+            if 'special' in watch:
+                indices = list(range(watch['special']['offset'], watch['special']['offset'] + watch['special']['length']))
+                children = [value.GetValueForExpressionPath(f'[{index}]') for index in indices]
+                children = list(map(lambda v: { 'expr': v.GetName(), 'value': v, 'children': [], 'parent': watch }, children))
+            else:
+                if value.MightHaveChildren():
+                    children = [value.GetChildAtIndex(index) for index in range(value.GetNumChildren())]
+                    children = list(map(lambda v: { 'expr': v.GetName(), 'value': v, 'children': [], 'parent': watch }, children))
+                else:
+                    children = []
+        else:
+            children = []
+        return children
+
     def watch_window_expand_watch(self):
         if self.process_info['state'] != 'running':
             watch = self.get_watch()
-            value = watch['value']
-            if not watch['children'] and value and value.MightHaveChildren():
-                children = [value.GetChildAtIndex(index) for index in range(value.GetNumChildren())]
-                children = list(map(lambda v: { 'expr': v.GetName(), 'value': v, 'children': [], 'parent': watch }, children))
-                watch['children'] = children
-                self.update_window('watch')
+            if not watch['children']:
+                watch['children'] = self.get_watch_children(watch)
+                if watch['children']:
+                    self.update_window('watch')
         else:
             self.log_error('Cannot modify watch window from running state')
 
     def watch_window_collapse_watch(self):
         if self.process_info['state'] != 'running':
             watch = self.get_watch()
+            # NOTE: If current watch cannot be collapsed but there's parent, collapse parent instead
             if not watch['children'] and watch['parent']:
                 watch = watch['parent']
             if watch['children']:
@@ -827,6 +841,28 @@ class Context:
                 self.update_window('watch')
         else:
             self.log_error('Cannot modify watch window from running state')
+
+    # NOTE: Reevaluation takes care of the cases where the same variable mean different things in different frames. It maintains the watch structure as long as possible
+    def reevaluate_watch_list(self):
+        def expand_children(watch, curr_children):
+            if curr_children:
+                watch['children'] = self.get_watch_children(watch)
+                for child in watch['children']:
+                    match_child = None
+                    for curr_child in curr_children:
+                        if curr_child['expr'] == child['expr']:
+                            match_child = curr_child
+                            break
+                    # NOTE: We want to expand child if the same name is expanded in the current watch structure
+                    if match_child:
+                        expand_children(child, match_child['children'])
+
+        if self.process_info['state'] == 'stopped':
+            for watch in self.watch_list:
+                curr_children = watch['children']
+                new_watch = self.evaluate_expr(watch['expr'])
+                list_replace(self.watch_list, watch, new_watch)
+                expand_children(new_watch, curr_children)
 
     def handle_process_stopped(self, process_info, stopped_thread_info):
         def get_top_frame(thread_info):

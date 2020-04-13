@@ -20,21 +20,15 @@ struct Vec2Another
 
 int f()
 {
-    int x;
+    int z;
     return 10;
 }
 
-int main()
+int main(int argc, char **argv)
 {
-    char* hello = "HellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHelloooooooooooooooooooooooooooooooooooooooooooooooooooooooooooHello"
-    int buffer[20];
-    int *x = buffer;
-    Vec2 vec;
-    vec.x = 0;
-    vec.inner.y = 100;
-    Vec2 *pvec = &vec;
+    int x[3] = { 1, 2, 3 };
+    int *y = x;
     f();
-    while (true)  ;
     return 0;
 }
 

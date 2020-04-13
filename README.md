@@ -1,6 +1,6 @@
 # Vim-LLDB
 
-This is a LLDB debugger plugin for Neovim. It's currently in a very early stage, bug report would be much appreciated!
+This is a LLDB debugger plugin for Neovim. It's currently in a very early stage, bug report and feature request would be much appreciated!
 
 ## Functionality
 

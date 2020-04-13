@@ -13,9 +13,14 @@ struct Vec2
     Vec2Inner inner;
 };
 
+struct Vec2Another
+{
+    Vec2 inner;
+};
+
 int f()
 {
-    int vec = 10;
+    Vec2Another vec;
     return 10;
 }
 
@@ -25,6 +30,7 @@ int main()
     vec.x = 0;
     vec.inner.y = 100;
     f();
+    while (true)  ;
     return 0;
 }
 

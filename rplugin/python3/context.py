@@ -6,6 +6,13 @@ import inspect
 from contextlib import contextmanager
 import lldb
 
+def list_replace(list, old_value, new_value):
+    try:
+        index = list.index(old_value)
+        list[index] = new_value
+    except ValueError:
+        pass
+
 # TODO
 # resource management (e.g. SBTarget), error handling (SBError vs IsValid), Python C++ interface
 # multiple processes per target?
@@ -19,9 +26,9 @@ import lldb
 # Any case where MightHaveChildren returns True but acutal children number is 0?
 
 # TODO
-# Figure out running state
-# Multiple frame cursors for selected thread
 # matchdelete in nvim https://github.com/neovim/neovim/issues/12110
+# Configuration debugger window layout, window key mapping
+# Log breakpoint attach failure (is IsValid the right function to use?)
 # Investigate wrong frame information, image lookup --verbose --address <pc>
 
 class Context:
@@ -29,8 +36,8 @@ class Context:
     VIM_LLDB_WINDOW_LOCK = 'vim_lldb_window_lock'
     VIM_LLDB_WINDOW_MATCH = 'vim_lldb_window_match'
     VIM_LLDB_SIGN_BREAKPOINT = 'vim_lldb_sign_breakpoint'
-    VIM_LLDB_SIGN_CURSOR = 'vim_lldb_sign_cursor'
-    EXITED_PROCESS_INFO = { 'state': 'exited', 'threads': [] }
+    VIM_LLDB_SIGN_CURSOR_SELECTED = 'vim_lldb_sign_cursor'
+    VIM_LLDB_SIGN_CURSOR_NON_SELECTED = 'vim_lldb_sign_cursor_non_selected'
 
     def __init__(self, nvim):
         self.nvim = nvim
@@ -39,8 +46,10 @@ class Context:
         self.sign_id = 0
         self.command(f'highlight {self.VIM_LLDB_SIGN_BREAKPOINT}_HIGHLIGHT guifg=red')
         self.call('sign_define', self.VIM_LLDB_SIGN_BREAKPOINT, {'text': '●', 'texthl': f'{self.VIM_LLDB_SIGN_BREAKPOINT}_HIGHLIGHT'})
-        self.command(f'highlight {self.VIM_LLDB_SIGN_CURSOR}_HIGHLIGHT guifg=yellow')
-        self.call('sign_define', self.VIM_LLDB_SIGN_CURSOR, {'text': '➨', 'texthl': f'{self.VIM_LLDB_SIGN_CURSOR}_HIGHLIGHT'})
+        self.command(f'highlight {self.VIM_LLDB_SIGN_CURSOR_SELECTED}_HIGHLIGHT guifg=yellow')
+        self.call('sign_define', self.VIM_LLDB_SIGN_CURSOR_SELECTED, {'text': '➨', 'texthl': f'{self.VIM_LLDB_SIGN_CURSOR_SELECTED}_HIGHLIGHT'})
+        self.command(f'highlight {self.VIM_LLDB_SIGN_CURSOR_NON_SELECTED}_HIGHLIGHT guifg=lightgreen')
+        self.call('sign_define', self.VIM_LLDB_SIGN_CURSOR_NON_SELECTED, {'text': '➨', 'texthl': f'{self.VIM_LLDB_SIGN_CURSOR_NON_SELECTED}_HIGHLIGHT'})
 
         self.debugger = lldb.SBDebugger.Create()
         self.debugger.SetAsync(True)
@@ -49,7 +58,7 @@ class Context:
         self.selected_target = None
         self.select_target()
 
-        self.process_info = self.EXITED_PROCESS_INFO
+        self.process_info = { 'state': 'exited', 'threads': [] }
         self.selected_thread_info = None
         self.selected_frame_info_list = []
         self.breakpoint_list = []
@@ -65,9 +74,7 @@ class Context:
     def call(self, func, *args):
         return self.nvim.call(func, *args)
 
-    def to_lines(self, value):
-        return [repr(line) for line in value.split('\n')]
-
+    # NOTE: Use this funtion if the the Context method can be called from the event loop thread, it will automatcially dispatch an async_call if it's indeed called from event thread
     def thread_guard(self):
         if threading.current_thread().ident == self.tid:
             return True
@@ -78,6 +85,10 @@ class Context:
             args = list(map(args_info.locals.get, args_info.args))
             self.nvim.async_call(function, *args)
             return False
+
+    # NOTE: Pynvim echomsg doesn't handle multi-line string correctly, split into multiple lines
+    def to_lines(self, value):
+        return [repr(line) for line in value.split('\n')]
 
     def log_info(self, value):
         if self.thread_guard():
@@ -91,7 +102,7 @@ class Context:
         if self.thread_guard():
             if type(value) == str:
                 for line in self.to_lines(value):
-                    # NOTE: echoerr seems to be treated as throwing error
+                    # NOTE: echoerr seems to be treated as throwing error, so we have to use echomsg instead
                     self.command(f'echohl ErrorMsg')
                     self.command(f'echomsg {line}')
                     self.command(f'echohl Normal')
@@ -136,17 +147,26 @@ class Context:
     def set_line_column(self, line, column):
         self.call('cursor', line, column)
 
+    def get_window_var(self, window, var):
+        return self.call('getwinvar', window, var)
+
+    def set_window_var(self, window, var, value):
+        return self.call('setwinvar', window, var, value)
+
     def get_buffer_file(self, buffer = 0):
         buffer = buffer or self.get_buffer()
         return os.path.abspath(self.call('bufname', buffer))
 
+    # NOTE: Sync a list of signs in memory to screen
     def sync_signs(self, sign_type, sign_list):
         buffer_count = self.get_buffer_count()
         for buffer in range(1, buffer_count + 1):
             if self.is_buffer_valid(buffer):
+                # NOTE: We need to calculate the diff between the signs on screen and signs in memory, since we can't just remove all signs and add new signs all together, which causes a visual flash for unchanged signs
                 buffer_curr_sign_list = self.call('sign_getplaced', buffer, { 'group': sign_type })[0]['signs']
                 buffer_sign_list = [sign for sign in sign_list if sign['file'] == self.get_buffer_file(buffer)]
 
+                # NOTE: Calculate signs on screen to remove
                 for buffer_curr_sign in buffer_curr_sign_list:
                     found = False
                     for buffer_sign in buffer_sign_list:
@@ -156,6 +176,7 @@ class Context:
                     if not found:
                         self.call('sign_unplace', sign_type, { 'buffer': buffer, 'id': buffer_curr_sign['id'] })
 
+                # NOTE: Calculate signs in memory to add
                 for buffer_sign in buffer_sign_list:
                     found = False
                     for buffer_curr_sign in buffer_curr_sign_list:
@@ -164,36 +185,41 @@ class Context:
                             break
                     if not found:
                         self.sign_id += 1
-                        priorities = {self.VIM_LLDB_SIGN_BREAKPOINT: 1000, self.VIM_LLDB_SIGN_CURSOR: 2000}
+                        # NOTE: Process cursor shows on top of breakpoint
+                        priorities = {self.VIM_LLDB_SIGN_BREAKPOINT: 1000, self.VIM_LLDB_SIGN_CURSOR_SELECTED: 2000, self.VIM_LLDB_SIGN_CURSOR_NON_SELECTED: 2000}
                         self.call('sign_place', self.sign_id, sign_type, sign_type, buffer,
                              { 'lnum': buffer_sign['line'], 'priority': priorities[sign_type]})
 
+    # NOTE: Sync signs on screen back to memory
     def sync_back_signs(self, sign_type, sign_list):
         buffer = self.get_buffer()
         buffer_curr_sign_list = sorted(self.call('sign_getplaced', buffer, { 'group': sign_type })[0]['signs'], key=lambda x: x['lnum'])
         buffer_sign_list = sorted([sign for sign in sign_list if sign['file'] == self.get_buffer_file(buffer)], key=lambda x: x['line'])
 
+        # NOTE: Since this function will only be called when text is changed, we assume the number of signs on screen and in memory are already aligned, so we only adjust the line number
         has_change = False
         for i in range(len(buffer_sign_list)):
             if buffer_sign_list[i]['line'] != buffer_curr_sign_list[i]['lnum']:
                 buffer_sign_list[i]['line'] = buffer_curr_sign_list[i]['lnum']
                 has_change = True
 
+        # NOTE: Let caller know if update is needed
         return has_change
 
     def goto_file(self, file, line, column):
+        # NOTE: Show file in current window > last window > new window
         window = 0
         test_window = self.get_window()
-        if not self.call('getwinvar', test_window, self.VIM_LLDB_WINDOW_KEY):
+        if not self.get_window_var(test_window, self.VIM_LLDB_WINDOW_KEY):
             window = test_window
         else:
             test_window = self.get_last_window()
-            if not self.call('getwinvar', test_window, self.VIM_LLDB_WINDOW_KEY):
+            if not self.get_window_var(test_window, self.VIM_LLDB_WINDOW_KEY):
                 window = test_window
             else:
                 window_count = self.get_window_count()
                 for test_window in range(1, window_count + 1):
-                    if not self.call('getwinvar', test_window, self.VIM_LLDB_WINDOW_KEY):
+                    if not self.get_window_var(test_window, self.VIM_LLDB_WINDOW_KEY):
                         window = test_window
                         break
         if window:
@@ -202,6 +228,7 @@ class Context:
             self.command('vnew')
             window = self.get_window()
 
+        # NOTE: Find existing buffer if possible, otherwise edit new buffer
         buffer = 0
         buffer_count = self.get_buffer()
         for test_buffer in range(1, buffer_count + 1):
@@ -218,15 +245,15 @@ class Context:
 
         self.set_line_column(line, column)
 
-    def is_window(self, name = ''):
+    def is_debugger_window(self, name = ''):
         window = self.get_window()
-        window_name = self.call('getwinvar', window, self.VIM_LLDB_WINDOW_KEY)
+        window_name = self.get_window_var(window, self.VIM_LLDB_WINDOW_KEY)
         return window_name and (name == '' or window_name == name)
 
     def check_window_exists(self, name = ''):
         window_count = self.get_window_count()
         for window in range(1, window_count + 1):
-            window_name = self.call('getwinvar', window, self.VIM_LLDB_WINDOW_KEY)
+            window_name = self.get_window_var(window, self.VIM_LLDB_WINDOW_KEY)
             if window_name:
                 if name == '' or window_name == name:
                     return window
@@ -234,26 +261,27 @@ class Context:
 
     def create_window(self, name):
         window = self.get_window()
-        self.call('setwinvar', window, '&readonly', 1)
-        self.call('setwinvar', window, '&modifiable', 0)
-        self.call('setwinvar', window, '&buftype', 'nofile')
-        self.call('setwinvar', window, '&buflisted', 0)
-        self.call('setwinvar', window, '&bufhidden', 'wipe')
-        self.call('setwinvar', window, '&swapfile', 0)
-        self.call('setwinvar', window, '&number', 0)
-        self.call('setwinvar', window, '&ruler', 0)
-        self.call('setwinvar', window, '&wrap', 0)
+        self.set_window_var(window, '&readonly', 1)
+        self.set_window_var(window, '&modifiable', 0)
+        self.set_window_var(window, '&buftype', 'nofile')
+        self.set_window_var(window, '&buflisted', 0)
+        self.set_window_var(window, '&bufhidden', 'wipe')
+        self.set_window_var(window, '&swapfile', 0)
+        self.set_window_var(window, '&number', 0)
+        self.set_window_var(window, '&ruler', 0)
+        self.set_window_var(window, '&wrap', 0)
 
-        self.command(f'file vim-lldb({name})')
-        self.call('setwinvar', window, self.VIM_LLDB_WINDOW_KEY, name)
+        self.command(f'file vim-lldb ({name})')
+        self.set_window_var(window, self.VIM_LLDB_WINDOW_KEY, name)
 
+        # NOTE: We can use <nowait> in the future if we want to map 'd' into a shortcut
         if name == 'stack':
             self.command('nnoremap <buffer> <CR> :call VimLLDB_StackWindow_GotoFrame()<CR>')
             self.command('nnoremap <buffer> <C-n> :call StackWindow_NextThread()<CR>')
             self.command('nnoremap <buffer> <C-p> :call StackWindow_PrevThread()<CR>')
         elif name == 'breakpoint':
             self.command('nnoremap <buffer> <CR> :call VimLLDB_BreakpointWindow_GotoBreakpoint()<CR>')
-            self.command('nnoremap <buffer> <nowait> d :call VimLLDB_BreakpointWindow_RemoveBreakpoint()<CR>')
+            self.command('nnoremap <buffer> md :call VimLLDB_BreakpointWindow_RemoveBreakpoint()<CR>')
         elif name == 'watch':
             self.command('nnoremap <buffer> ma :call VimLLDB_WatchWindow_AddWatch()<CR>')
             self.command('nnoremap <buffer> mm :call VimLLDB_WatchWindow_ChangeWatch()<CR>')
@@ -265,7 +293,7 @@ class Context:
         while True:
             window_count = self.get_window_count()
             for window in range(1, window_count + 1):
-                window_name = self.call('getwinvar', window, self.VIM_LLDB_WINDOW_KEY)
+                window_name = self.get_window_var(window, self.VIM_LLDB_WINDOW_KEY)
                 if window_name and (name == '' or window_name == name):
                     if window_count > 1:
                         self.command(f'{window}quit!')
@@ -276,11 +304,15 @@ class Context:
                 break
 
     def update_window(self, name):
+        def get_breakpoint_window_lines():
+            lines = []
+            for breakpoint in self.breakpoint_list:
+                lines.append({'text': f'{breakpoint["file"]}:{breakpoint["line"]}' })
+            return lines
+
         def get_stack_window_lines():
             lines = []
-            if self.process_info['state'] == 'exited':
-                lines.append({ 'text': 'process exited' })
-            else:
+            if self.process_info['state'] == 'stopped':
                 selected_frame_info = self.get_selected_frame_info()
                 for line, frame_info in enumerate(self.selected_thread_info['frames'], start=1):
                     if frame_info['type'] == 'full':
@@ -292,12 +324,8 @@ class Context:
                     lines.append(line)
                 lines.append({ 'text': '' })
                 lines.append({ 'text': f'thread {self.selected_thread_info["id"]}' })
-            return lines
-
-        def get_breakpoint_window_lines():
-            lines = []
-            for breakpoint in self.breakpoint_list:
-                lines.append({'text': f'{breakpoint["file"]}:{breakpoint["line"]}' })
+            else:
+                lines.append({ 'text': f'process {self.process_info["state"]}' })
             return lines
 
         def get_watch_window_lines():
@@ -305,28 +333,34 @@ class Context:
             def add_watch_list_lines(watch_list, depth):
                 indent = '  ' * depth
                 for watch in watch_list:
-                    if watch['value'].MightHaveChildren():
-                        if watch['children']:
-                            lines.append({ 'text': f'{indent}{watch["expr"]}' })
-                            add_watch_list_lines(watch['children'], depth + 1)
+                    if self.process_info['state'] == 'stopped':
+                        if watch['value'].MightHaveChildren():
+                            if watch['children']:
+                                lines.append({ 'text': f'{indent}{watch["expr"]}' })
+                                add_watch_list_lines(watch['children'], depth + 1)
+                            else:
+                                lines.append({ 'text': f'{indent}{watch["expr"]}  ...' })
                         else:
-                            lines.append({ 'text': f'{indent}{watch["expr"]}  ...' })
+                            lines.append({ 'text': f'{indent}{watch["expr"]}  {watch["value"].GetValue()}' })
                     else:
-                        lines.append({ 'text': f'{indent}{watch["expr"]}  {watch["value"].GetValue()}' })
+                        lines.append({ 'text': f'{indent}{watch["expr"]}' })
+                        if watch['children']:
+                            add_watch_list_lines(watch['children'], depth + 1)
             add_watch_list_lines(self.watch_list, 0)
             return lines
 
+        # NOTE: All debugger window are non-modifiable. Modify the window through a temporary modifiable environment
         @contextmanager
         def writing(window):
             saved_line = self.get_line()
             saved_column = self.get_column()
 
-            self.call('setwinvar', window, '&readonly', 0)
-            self.call('setwinvar', window, '&modifiable', 1)
+            self.set_window_var(window, '&readonly', 0)
+            self.set_window_var(window, '&modifiable', 1)
             yield
-            self.call('setwinvar', window, '&readonly', 1)
-            self.call('setwinvar', window, '&modifiable', 0)
-            self.call('setwinvar', window, '&modified', 0)
+            self.set_window_var(window, '&readonly', 1)
+            self.set_window_var(window, '&modifiable', 0)
+            self.set_window_var(window, '&modified', 0)
 
             self.set_line_column(saved_line, saved_column)
 
@@ -339,12 +373,13 @@ class Context:
             elif name == 'watch':
                 lines = get_watch_window_lines()
             with writing(window):
-                window_matches = self.call('getwinvar', window, self.VIM_LLDB_WINDOW_MATCH)
+                window_matches = self.get_window_var(window, self.VIM_LLDB_WINDOW_MATCH)
                 if window_matches:
                     for match in window_matches:
                         self.call('matchdelete', match, window)
                 window_matches = []
 
+                # NOTE: We use deletebufline and setbufline instead of navigating to the window so that we don't see a flash of cursor change
                 buffer = self.call('winbufnr', window)
                 self.call('deletebufline', buffer, 1, '$')
                 for line_index, line in enumerate(lines, start=1):
@@ -356,27 +391,28 @@ class Context:
                         # TODO: Add this code when matchdelete works
                         # match_id = self.call('matchaddpos', highlight_dictionary[line['highlight']], [line_index], -1, -1, { 'window': window })
                         # window_matches.append(match_id)
+                self.set_window_var(window, self.VIM_LLDB_WINDOW_MATCH, window_matches)
 
-                self.log_info(window_matches)
-                self.call('setwinvar', window, self.VIM_LLDB_WINDOW_MATCH, window_matches)
-
+    # NOTE: Lock all potential cpp files as non-modifiable when the process runs, so that we don't get into situations like breakpoint and cursor signs don't match their source code line
     def lock_files(self):
         window_count = self.get_window_count()
         for window in range(1, window_count + 1):
-            buffer = self.get_window_buffer()
+            buffer = self.get_window_buffer(window)
             if re.compile(r'.*\.(c|cpp|cxx|h|hpp|hxx)$').match(self.get_buffer_file(buffer)):
-                self.call('setwinvar', window, '&readonly', 1)
-                self.call('setwinvar', window, '&modifiable', 0)
-                self.call('setwinvar', window, self.VIM_LLDB_WINDOW_LOCK, 1)
+                self.set_window_var(window, '&readonly', 1)
+                self.set_window_var(window, '&modifiable', 0)
+                self.set_window_var(window, self.VIM_LLDB_WINDOW_LOCK, 1)
 
     def unlock_files(self):
         window_count = self.get_window_count()
         for window in range(1, window_count + 1):
-            if self.call('getwinvar', window, self.VIM_LLDB_WINDOW_LOCK):
-                self.call('setwinvar', window, '&readonly', 0)
-                self.call('setwinvar', window, '&modifiable', 1)
+            if self.get_window_var(window, self.VIM_LLDB_WINDOW_LOCK):
+                self.set_window_var(window, '&readonly', 0)
+                self.set_window_var(window, '&modifiable', 1)
+                self.set_window_var(window, self.VIM_LLDB_WINDOW_LOCK, 0)
                 
     def select_target(self, selection = 0):
+        # NOTE: Load target definitions when we select target so that we don't need a separate funtion to refresh target definitions 
         if self.call('exists', 'g:vim_lldb_targets'):
             targets = self.call('eval', 'g:vim_lldb_targets')
         else:
@@ -403,21 +439,30 @@ class Context:
         else:
             self.log_error('Invalid target selection')
 
+    # TODO: Don't allow concurrent toggling at the same time
     def toggle_debugger(self):
-        if self.check_window_exists():
-            self.destory_window()
+        if self.selected_target:
+            if self.check_window_exists():
+                self.destory_window()
+            else:
+                window = self.get_window()
+
+                self.command('vnew')
+                # NOTE: We need to update the window immediately after the window is created to avoid race condition of modifying a non-modifiable window. Why?
+                self.create_window('breakpoint')
+                self.update_window('breakpoint')
+
+                self.command('new')
+                self.create_window('watch')
+                self.update_window('watch')
+
+                self.command('new')
+                self.create_window('stack')
+                self.update_window('stack')
+
+                self.command(f'{window} wincmd w')
         else:
-            window = self.get_window()
-            self.command('vnew')
-            self.create_window('breakpoint')
-            self.update_window('breakpoint')
-            self.command('new')
-            self.create_window('watch')
-            self.update_window('watch')
-            self.command('new')
-            self.create_window('stack')
-            self.update_window('stack')
-            self.command(f'{window} wincmd w')
+            self.log_error('No target selected')
 
     def launch(self):
         if self.selected_target:
@@ -427,6 +472,7 @@ class Context:
                 working_dir = self.selected_target['working_dir']
                 environments = self.selected_target['environments']
 
+                # NOTE: We simplify the breakpoint states by creating a new target (no breakpoint) every time we launch, and creating all breakpoints
                 if 'handle' in self.selected_target and self.selected_target['handle']:
                     self.debugger.DeleteTarget(self.selected_target['handle'])
                 self.selected_target['handle'] = self.debugger.CreateTargetWithFileAndTargetTriple(executable, 'x86_64-unknown-linux-gnu')
@@ -458,8 +504,7 @@ class Context:
     def step_over(self):
         if self.selected_target:
             if self.process_info['state'] == 'stopped':
-                process = self.selected_target['handle'].GetProcess()
-                thread = process.GetThreadByIndexID(self.selected_thread_info['id']);
+                thread = self.selected_thread_info['handle']
                 error = lldb.SBError()
                 thread.StepOver(lldb.eOnlyDuringStepping, error)
                 if error.Fail():
@@ -472,8 +517,7 @@ class Context:
     def step_into(self):
         if self.selected_target:
             if self.process_info['state'] == 'stopped':
-                process = self.selected_target['handle'].GetProcess()
-                thread = process.GetThreadByIndexID(self.selected_thread_info['id']);
+                thread = self.selected_thread_info['handle']
                 thread.StepInto()
             else:
                 self.log_error('Cannot step from non-stopped state')
@@ -483,8 +527,7 @@ class Context:
     def step_out(self):
         if self.selected_target:
             if self.process_info['state'] == 'stopped':
-                process = self.selected_target['handle'].GetProcess()
-                thread = process.GetThreadByIndexID(self.selected_thread_info['id']);
+                thread = self.selected_thread_info['handle']
                 thread.StepOut()
             else:
                 self.log_error('Cannot step from non-stopped state')
@@ -528,11 +571,16 @@ class Context:
             self.log_error('No target selected')
 
     def update_process_cursor(self):
-        cursor_list = []
-        for thread_info in self.process_info['threads']:
-            top_frame = thread_info['frames'][0]
-            cursor_list.append({ 'file': top_frame['file'], 'line': top_frame['line'], 'id': thread_info['id'] })
-        self.sync_signs(self.VIM_LLDB_SIGN_CURSOR, cursor_list)
+        cursor_list_selected = []
+        cursor_list_non_selected = []
+        if self.process_info['state'] == 'stopped':
+            selected_frame_info = self.get_selected_frame_info()
+            for frame_info in self.selected_thread_info['frames']:
+                if frame_info['type'] == 'full':
+                    cursor_list = cursor_list_selected if frame_info == selected_frame_info else cursor_list_non_selected
+                    cursor_list.append({ 'file': frame_info['file'], 'line': frame_info['line'] })
+        self.sync_signs(self.VIM_LLDB_SIGN_CURSOR_SELECTED, cursor_list_selected)
+        self.sync_signs(self.VIM_LLDB_SIGN_CURSOR_NON_SELECTED, cursor_list_non_selected)
 
     def toggle_breakpoint(self):
         if self.selected_target:
@@ -569,13 +617,15 @@ class Context:
             self.log_error('No target selected')
 
     def buffer_sync(self):
-        self.sync_signs(self.VIM_LLDB_SIGN_BREAKPOINT, self.breakpoint_list)
-        self.update_process_cursor()
-        if self.process_info['state'] != 'exited':
-            self.lock_files()
+        if not self.is_debugger_window():
+            self.sync_signs(self.VIM_LLDB_SIGN_BREAKPOINT, self.breakpoint_list)
+            self.update_process_cursor()
+            if self.process_info['state'] != 'exited':
+                self.lock_files()
 
-    def breakpoint_sync_back(self):
-        if not self.is_window():
+    def buffer_sync_back(self):
+        # NOTE: We don't want to sync back breakpoint window, otherwise update_window will keep triggerring buffer_sync_back, causing a dead loop
+        if not self.is_debugger_window():
             if self.sync_back_signs(self.VIM_LLDB_SIGN_BREAKPOINT, self.breakpoint_list):
                 self.update_window('breakpoint')
 
@@ -587,38 +637,41 @@ class Context:
         return None
 
     def goto_selected_frame(self):
-        if self.process_info['state'] != 'exited':
-            selected_frame_info = self.get_selected_frame_info()
-            if selected_frame_info and selected_frame_info['type'] == 'full':
-                self.goto_file(selected_frame_info['file'], selected_frame_info['line'], selected_frame_info['column'])
+        selected_frame_info = self.get_selected_frame_info()
+        if selected_frame_info and selected_frame_info['type'] == 'full':
+            self.goto_file(selected_frame_info['file'], selected_frame_info['line'], selected_frame_info['column'])
 
     def stack_window_goto_frame(self):
-        if self.process_info['state'] != 'exited':
+        if self.process_info['state'] == 'stopped':
             frame_index = self.get_line() - 1
             frame_info = self.selected_thread_info['frames'][frame_index]
             if frame_info['type'] == 'full':
-                selected_thread_index = self.process_info['threads'].index(self.selected_thread_info)
-                if self.selected_frame_info_list[selected_thread_index] != frame_info:
-                    self.selected_frame_info_list[selected_thread_index] = frame_info
+                selected_frame_info = self.get_selected_frame_info()
+                if selected_frame_info != frame_info:
+                    list_replace(self.selected_frame_info_list, selected_frame_info, frame_info)
                     self.update_window('stack')
+                    self.reevaluate_watch_list()
                     self.update_window('watch')
+                # NOTE: Always focus frame even selected frame is the same, since user may move away manually
                 self.goto_selected_frame()
 
     def stack_window_next_thread(self):
-        if self.process_info['state'] != 'exited':
+        if self.process_info['state'] == 'stopped':
             selected_thread_index = self.process_info['threads'].index(self.selected_thread_info)
             selected_thread_index = (selected_thread_index + 1) % len(self.process_info['threads'])
             self.selected_thread_info = self.process_info['threads'][selected_thread_index]
             self.update_window('stack')
+            self.reevaluate_watch_list()
             self.update_window('watch')
             self.goto_selected_frame()
 
     def stack_window_prev_thread(self):
-        if self.process_info['state'] != 'exited':
+        if self.process_info['state'] == 'stopped':
             selected_thread_index = self.process_info['threads'].index(self.selected_thread_info)
             selected_thread_index = (selected_thread_index - 1 + len(self.process_info['threads'])) % len(self.process_info['threads'])
             self.selected_thread_info = self.process_info['threads'][selected_thread_index]
             self.update_window('stack')
+            self.reevaluate_watch_list()
             self.update_window('watch')
             self.goto_selected_frame()
 
@@ -641,6 +694,7 @@ class Context:
             else:
                 self.log_error('Cannot remove breakpoint')
 
+    # NOTE: Get watch in the nested structure from line number
     def get_watch(self, line = 0):
         if not line:
             line = self.get_line()
@@ -659,13 +713,19 @@ class Context:
         return found_watch
 
     def evaluate_expr(self, expr):
-        frame = self.get_selected_frame_info()['handle']
-        if re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$').match(expr):
-            value = frame.FindVariable(expr)
+        if self.process_info['state'] == 'stopped':
+            frame = self.get_selected_frame_info()['handle']
+            # NOTE: Do not evaluate expression if the expression is variable-like to avoid parsing overhead
+            if re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$').match(expr):
+                value = frame.FindVariable(expr)
+            else:
+                value = frame.EvaluateExpression(expr)
         else:
-            value = frame.EvaluateExpression(expr)
+            # NOTE: We return None here instead of generating error since we want to be able to modify the watch window from exited state. This simplifies the caller
+            value = None
         return value
 
+    # NOTE: Reevaluation maintains the watch expanded/collapsed structure as long as possible
     def reevaluate_watch_list(self):
         def expand_children(watch, curr_children):
             value = watch['value']
@@ -680,46 +740,48 @@ class Context:
                         if curr_child['expr'] == child['expr']:
                             match_child = curr_child
                             break
+                    # NOTE: We want to expand child if the same name is expanded in the current watch structure
                     if match_child:
                         expand_children(child, match_child['children'])
             else:
                 watch['children'] = []
 
-        for watch in self.watch_list:
-            watch['value'] = self.evaluate_expr(watch['expr'])
-            expand_children(watch, watch['children'])
+        if self.process_info['state'] == 'stopped':
+            for watch in self.watch_list:
+                watch['value'] = self.evaluate_expr(watch['expr'])
+                expand_children(watch, watch['children'])
 
     def watch_window_add_watch(self):
-        if self.process_info['state'] != 'exited':
+        if self.process_info['state'] != 'running':
             expr = self.call('input', 'Please add watch expression:\n')
+            # NOTE: Do not add watch when user cancels input or have empty input
             if expr:
                 value = self.evaluate_expr(expr)
                 watch = { 'expr': expr, 'value': value, 'children': [], 'parent': None }
                 self.watch_list.append(watch)
                 self.update_window('watch')
+                # NOTE: Go to the newly added watch
                 self.set_line_column(self.get_line_count(), 0)
         else:
-            self.log_error('Cannot modify watch window from exited state')
+            self.log_error('Cannot modify watch window from running state')
 
     def watch_window_change_watch(self):
-        if self.process_info['state'] != 'exited':
+        if self.process_info['state'] != 'running':
             if self.watch_list:
                 watch = self.get_watch()
-                if watch['parent']:
-                    self.log_error('Cannot change non-root expression')
-                else:
-                    expr = self.call('input', 'Please change watch expression:\n')
-                    if expr:
-                        value = self.evaluate_expr(expr)
-                        new_watch = { 'expr': expr, 'value': value, 'children': [], 'parent': None }
-                        watch_index = self.watch_list.index(watch)
-                        self.watch_list[watch_index] = new_watch
-                        self.update_window('watch')
+                while watch['parent']:
+                    watch = watch['parent']
+                expr = self.call('input', 'Please change watch expression:\n')
+                if expr:
+                    value = self.evaluate_expr(expr)
+                    new_watch = { 'expr': expr, 'value': value, 'children': [], 'parent': None }
+                    list_replace(self.watch_list, watch, new_watch)
+                    self.update_window('watch')
         else:
-            self.log_error('Cannot modify watch window from exited state')
+            self.log_error('Cannot modify watch window from running state')
 
     def watch_window_remove_watch(self):
-        if self.process_info['state'] != 'exited':
+        if self.process_info['state'] != 'running':
             if self.watch_list:
                 watch = self.get_watch()
                 while watch['parent']:
@@ -727,10 +789,10 @@ class Context:
                 self.watch_list.remove(watch)
                 self.update_window('watch')
         else:
-            self.log_error('Cannot modify watch window from exited state')
+            self.log_error('Cannot modify watch window from running state')
 
     def watch_window_expand_watch(self):
-        if self.process_info['state'] != 'exited':
+        if self.process_info['state'] != 'running':
             watch = self.get_watch()
             value = watch['value']
             if not watch['children'] and value.MightHaveChildren():
@@ -739,10 +801,10 @@ class Context:
                 watch['children'] = children
                 self.update_window('watch')
         else:
-            self.log_error('Cannot modify watch window from exited state')
+            self.log_error('Cannot modify watch window from running state')
 
     def watch_window_collapse_watch(self):
-        if self.process_info['state'] != 'exited':
+        if self.process_info['state'] != 'running':
             watch = self.get_watch()
             if not watch['children'] and watch['parent']:
                 watch = watch['parent']
@@ -750,7 +812,7 @@ class Context:
                 watch['children'] = []
                 self.update_window('watch')
         else:
-            self.log_error('Cannot modify watch window from exited state')
+            self.log_error('Cannot modify watch window from running state')
 
     def handle_process_stopped(self, process_info, stopped_thread_info):
         def get_top_frame(thread_info):
@@ -761,22 +823,35 @@ class Context:
 
         if self.thread_guard():
             self.process_info = process_info
+            # NOTE: Select stopped thread and top frame (with debugging info) for each thread
             self.selected_thread_info = stopped_thread_info
             self.selected_frame_info_list = [get_top_frame(thread_info) for thread_info in process_info['threads']]
-            self.reevaluate_watch_list()
-            self.update_window('watch')
             self.update_window('stack')
             self.update_process_cursor()
+            self.reevaluate_watch_list()
+            self.update_window('watch')
             self.goto_selected_frame()
 
     def handle_process_exited(self):
         if self.thread_guard():
-            self.process_info = self.EXITED_PROCESS_INFO
+            self.process_info = { 'state': 'exited', 'threads': [] }
             self.selected_thread_info = None
             self.selected_frame_info_list = []
             self.update_window('stack')
             self.update_process_cursor()
+            self.reevaluate_watch_list()
+            self.update_window('watch')
             self.unlock_files()
+
+    def handle_process_running(self):
+        if self.thread_guard():
+            self.process_info = { 'state': 'running', 'threads': [] }
+            self.selected_thread_info = None
+            self.selected_frame_info_list = []
+            self.update_window('stack')
+            self.update_process_cursor()
+            self.reevaluate_watch_list()
+            self.update_window('watch')
 
 def event_loop(context):
     def get_process_info(process):
@@ -846,7 +921,7 @@ def event_loop(context):
                         elif state == lldb.eStateExited:
                             context.handle_process_exited()
                         elif state == lldb.eStateRunning:
-                            pass
+                            context.handle_process_running()
                 elif event.BroadcasterMatchesRef(context.exit_broadcaster):
                     break
     except Exception:

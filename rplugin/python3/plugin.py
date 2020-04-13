@@ -1,6 +1,8 @@
+# NOTE: Vim runtime cannot load local .py package by default for some reason, we have to manually manipulate the loading path
 import sys
 from os import path
 sys.path.append(path.dirname(__file__))
+
 import pynvim
 import lldb
 from context import Context
@@ -94,25 +96,22 @@ class Handler(object):
 
     @pynvim.autocmd('BufEnter')
     def buffer_sync(self):
-        # NOTE: BufEnter is called on vim startup, initialize here
+        # NOTE: BufEnter is called on vim startup, initialize here instead of VimEnter because VimEnter is called after all buffers are loaded
         self.startup()
+        # NOTE: When a new buffer enters, we should display the signs and lock the files correctly.
         self.context.buffer_sync()
 
+    # NOTE: When text is changed, the sign positions might change. We need to sync this back with current breakpoint list
     @pynvim.autocmd('TextChanged')
-    def breakpoint_sync_back1(self):
-        self.context.breakpoint_sync_back()
-
     @pynvim.autocmd('TextChangedI')
-    def breakpoint_sync_back2(self):
-        self.context.breakpoint_sync_back()
-
     @pynvim.autocmd('TextChangedP')
-    def breakpoint_sync_back3(self):
-        self.context.breakpoint_sync_back()
+    def buffer_sync_back(self):
+        self.context.buffer_sync_back()
 
     @pynvim.autocmd('VimLeavePre')
     def shutdown(self):
         if self.started:
+            # NOTE: Shutdown the event loop by sending it an event for it to break out, so that all threads are cleared when vim exits hence vim doesn't hang
             self.context.exit_broadcaster.BroadcastEventByType(1)
             self.context.event_loop.join()
 

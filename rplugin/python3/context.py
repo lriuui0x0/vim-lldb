@@ -19,8 +19,8 @@ import lldb
 # Any case where MightHaveChildren returns True but acutal children number is 0?
 
 # TODO
-# Re-evaluate watch expressions
 # Figure out running state
+# Multiple frame cursors for selected thread
 # matchdelete in nvim https://github.com/neovim/neovim/issues/12110
 # Investigate wrong frame information, image lookup --verbose --address <pc>
 
@@ -253,7 +253,7 @@ class Context:
             self.command('nnoremap <buffer> <C-p> :call StackWindow_PrevThread()<CR>')
         elif name == 'breakpoint':
             self.command('nnoremap <buffer> <CR> :call VimLLDB_BreakpointWindow_GotoBreakpoint()<CR>')
-            self.command('nnoremap <buffer> md :call VimLLDB_BreakpointWindow_RemoveBreakpoint()<CR>')
+            self.command('nnoremap <buffer> <nowait> d :call VimLLDB_BreakpointWindow_RemoveBreakpoint()<CR>')
         elif name == 'watch':
             self.command('nnoremap <buffer> ma :call VimLLDB_WatchWindow_AddWatch()<CR>')
             self.command('nnoremap <buffer> mm :call VimLLDB_WatchWindow_ChangeWatch()<CR>')
@@ -306,7 +306,7 @@ class Context:
                 indent = '  ' * depth
                 for watch in watch_list:
                     if watch['value'].MightHaveChildren():
-                        if len(watch['children']):
+                        if watch['children']:
                             lines.append({ 'text': f'{indent}{watch["expr"]}' })
                             add_watch_list_lines(watch['children'], depth + 1)
                         else:
@@ -353,6 +353,7 @@ class Context:
                         highlight_dictionary = {
                             'invalid': 'Comment'
                         }
+                        # TODO: Add this code when matchdelete works
                         # match_id = self.call('matchaddpos', highlight_dictionary[line['highlight']], [line_index], -1, -1, { 'window': window })
                         # window_matches.append(match_id)
 
@@ -649,7 +650,7 @@ class Context:
             for watch in watch_list:
                 if offset == line:
                     found_watch = watch
-                if len(watch['children']):
+                if watch['children']:
                     offset = find_watch(watch['children'], offset + 1)
                 else:
                     offset += 1
@@ -663,16 +664,37 @@ class Context:
             value = frame.FindVariable(expr)
         else:
             value = frame.EvaluateExpression(expr)
-        watch = { 'expr': expr, 'value': value, 'children': [], 'parent': None }
-        return watch
+        return value
 
-    def evaluate_watch_list(self):
-        pass
+    def reevaluate_watch_list(self):
+        def expand_children(watch, curr_children):
+            value = watch['value']
+            if curr_children and value.MightHaveChildren():
+                children = [value.GetChildAtIndex(index) for index in range(value.GetNumChildren())]
+                children = list(map(lambda v: { 'expr': v.GetName(), 'value': v, 'children': [], 'parent': watch }, children))
+                watch['children'] = children
+
+                for child in watch['children']:
+                    match_child = None
+                    for curr_child in curr_children:
+                        if curr_child['expr'] == child['expr']:
+                            match_child = curr_child
+                            break
+                    if match_child:
+                        expand_children(child, match_child['children'])
+            else:
+                watch['children'] = []
+
+        for watch in self.watch_list:
+            watch['value'] = self.evaluate_expr(watch['expr'])
+            expand_children(watch, watch['children'])
+
     def watch_window_add_watch(self):
         if self.process_info['state'] != 'exited':
             expr = self.call('input', 'Please add watch expression:\n')
             if expr:
-                watch = self.evaluate_expr(expr)
+                value = self.evaluate_expr(expr)
+                watch = { 'expr': expr, 'value': value, 'children': [], 'parent': None }
                 self.watch_list.append(watch)
                 self.update_window('watch')
                 self.set_line_column(self.get_line_count(), 0)
@@ -681,14 +703,15 @@ class Context:
 
     def watch_window_change_watch(self):
         if self.process_info['state'] != 'exited':
-            if len(self.watch_list):
+            if self.watch_list:
                 watch = self.get_watch()
                 if watch['parent']:
                     self.log_error('Cannot change non-root expression')
                 else:
                     expr = self.call('input', 'Please change watch expression:\n')
                     if expr:
-                        new_watch = self.evaluate_expr(expr)
+                        value = self.evaluate_expr(expr)
+                        new_watch = { 'expr': expr, 'value': value, 'children': [], 'parent': None }
                         watch_index = self.watch_list.index(watch)
                         self.watch_list[watch_index] = new_watch
                         self.update_window('watch')
@@ -697,7 +720,7 @@ class Context:
 
     def watch_window_remove_watch(self):
         if self.process_info['state'] != 'exited':
-            if len(self.watch_list):
+            if self.watch_list:
                 watch = self.get_watch()
                 while watch['parent']:
                     watch = watch['parent']
@@ -710,7 +733,7 @@ class Context:
         if self.process_info['state'] != 'exited':
             watch = self.get_watch()
             value = watch['value']
-            if not len(watch['children']) and value.MightHaveChildren():
+            if not watch['children'] and value.MightHaveChildren():
                 children = [value.GetChildAtIndex(index) for index in range(value.GetNumChildren())]
                 children = list(map(lambda v: { 'expr': v.GetName(), 'value': v, 'children': [], 'parent': watch }, children))
                 watch['children'] = children
@@ -721,9 +744,9 @@ class Context:
     def watch_window_collapse_watch(self):
         if self.process_info['state'] != 'exited':
             watch = self.get_watch()
-            if not len(watch['children']) and watch['parent']:
+            if not watch['children'] and watch['parent']:
                 watch = watch['parent']
-            if len(watch['children']):
+            if watch['children']:
                 watch['children'] = []
                 self.update_window('watch')
         else:
@@ -740,7 +763,7 @@ class Context:
             self.process_info = process_info
             self.selected_thread_info = stopped_thread_info
             self.selected_frame_info_list = [get_top_frame(thread_info) for thread_info in process_info['threads']]
-            self.evaluate_watch_list()
+            self.reevaluate_watch_list()
             self.update_window('watch')
             self.update_window('stack')
             self.update_process_cursor()

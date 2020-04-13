@@ -24,6 +24,7 @@ def list_replace(list, old_value, new_value):
 # differences between all the step functions
 # Why does StepInto not fail
 # Any case where MightHaveChildren returns True but acutal children number is 0?
+# What is use_dynamic for variable inspection?
 
 # TODO
 # matchdelete in nvim https://github.com/neovim/neovim/issues/12110
@@ -719,7 +720,10 @@ class Context:
             if re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$').match(expr):
                 value = frame.FindVariable(expr)
             else:
-                value = frame.EvaluateExpression(expr)
+                # NOTE: GetValueForVariablePath handles simple field accessor expressions (->, ., *, &, [])
+                value = frame.GetValueForVariablePath(expr)
+                if not value.IsValid():
+                    value = frame.EvaluateExpression(expr)
         else:
             # NOTE: We return None here instead of generating error since we want to be able to modify the watch window from exited state. This simplifies the caller
             value = None

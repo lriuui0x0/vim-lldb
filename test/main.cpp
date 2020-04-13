@@ -20,15 +20,19 @@ struct Vec2Another
 
 int f()
 {
-    Vec2Another vec;
+    int x;
     return 10;
 }
 
 int main()
 {
+    char* hello = "HellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHellHelloooooooooooooooooooooooooooooooooooooooooooooooooooooooooooHello"
+    int buffer[20];
+    int *x = buffer;
     Vec2 vec;
     vec.x = 0;
     vec.inner.y = 100;
+    Vec2 *pvec = &vec;
     f();
     while (true)  ;
     return 0;

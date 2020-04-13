@@ -28,7 +28,7 @@ def list_replace(list, old_value, new_value):
 
 # TODO
 # matchdelete in nvim https://github.com/neovim/neovim/issues/12110
-# Configuration debugger window layout, window key mapping
+# Configurable debugger window layout, window key mapping
 # Log breakpoint attach failure (is IsValid the right function to use?)
 # Investigate wrong frame information, image lookup --verbose --address <pc>
 
@@ -37,8 +37,8 @@ class Context:
     VIM_LLDB_WINDOW_LOCK = 'vim_lldb_window_lock'
     VIM_LLDB_WINDOW_MATCH = 'vim_lldb_window_match'
     VIM_LLDB_SIGN_BREAKPOINT = 'vim_lldb_sign_breakpoint'
-    VIM_LLDB_SIGN_CURSOR_SELECTED = 'vim_lldb_sign_cursor'
-    VIM_LLDB_SIGN_CURSOR_NON_SELECTED = 'vim_lldb_sign_cursor_non_selected'
+    VIM_LLDB_SIGN_CURSOR_SELECTED = 'vim_lldb_sign_cursor_selected'
+    VIM_LLDB_SIGN_CURSOR_NOT_SELECTED = 'vim_lldb_sign_cursor_not_selected'
 
     def __init__(self, nvim):
         self.nvim = nvim
@@ -49,11 +49,12 @@ class Context:
         self.call('sign_define', self.VIM_LLDB_SIGN_BREAKPOINT, {'text': '●', 'texthl': f'{self.VIM_LLDB_SIGN_BREAKPOINT}_HIGHLIGHT'})
         self.command(f'highlight {self.VIM_LLDB_SIGN_CURSOR_SELECTED}_HIGHLIGHT guifg=yellow')
         self.call('sign_define', self.VIM_LLDB_SIGN_CURSOR_SELECTED, {'text': '➨', 'texthl': f'{self.VIM_LLDB_SIGN_CURSOR_SELECTED}_HIGHLIGHT'})
-        self.command(f'highlight {self.VIM_LLDB_SIGN_CURSOR_NON_SELECTED}_HIGHLIGHT guifg=lightgreen')
-        self.call('sign_define', self.VIM_LLDB_SIGN_CURSOR_NON_SELECTED, {'text': '➨', 'texthl': f'{self.VIM_LLDB_SIGN_CURSOR_NON_SELECTED}_HIGHLIGHT'})
+        self.command(f'highlight {self.VIM_LLDB_SIGN_CURSOR_NOT_SELECTED}_HIGHLIGHT guifg=lightgreen')
+        self.call('sign_define', self.VIM_LLDB_SIGN_CURSOR_NOT_SELECTED, {'text': '➨', 'texthl': f'{self.VIM_LLDB_SIGN_CURSOR_NOT_SELECTED}_HIGHLIGHT'})
 
         self.debugger = lldb.SBDebugger.Create()
         self.debugger.SetAsync(True)
+        self.is_debugger_toggling = False
 
         self.targets = []
         self.selected_target = None
@@ -187,7 +188,7 @@ class Context:
                     if not found:
                         self.sign_id += 1
                         # NOTE: Process cursor shows on top of breakpoint
-                        priorities = {self.VIM_LLDB_SIGN_BREAKPOINT: 1000, self.VIM_LLDB_SIGN_CURSOR_SELECTED: 2000, self.VIM_LLDB_SIGN_CURSOR_NON_SELECTED: 2000}
+                        priorities = {self.VIM_LLDB_SIGN_BREAKPOINT: 1000, self.VIM_LLDB_SIGN_CURSOR_SELECTED: 2000, self.VIM_LLDB_SIGN_CURSOR_NOT_SELECTED: 2000}
                         self.call('sign_place', self.sign_id, sign_type, sign_type, buffer,
                              { 'lnum': buffer_sign['line'], 'priority': priorities[sign_type]})
 
@@ -278,8 +279,8 @@ class Context:
         # NOTE: We can use <nowait> in the future if we want to map 'd' into a shortcut
         if name == 'stack':
             self.command('nnoremap <buffer> <CR> :call VimLLDB_StackWindow_GotoFrame()<CR>')
-            self.command('nnoremap <buffer> <C-n> :call StackWindow_NextThread()<CR>')
-            self.command('nnoremap <buffer> <C-p> :call StackWindow_PrevThread()<CR>')
+            self.command('nnoremap <buffer> <C-n> :call VimLLDB_StackWindow_NextThread()<CR>')
+            self.command('nnoremap <buffer> <C-p> :call VimLLDB_StackWindow_PrevThread()<CR>')
         elif name == 'breakpoint':
             self.command('nnoremap <buffer> <CR> :call VimLLDB_BreakpointWindow_GotoBreakpoint()<CR>')
             self.command('nnoremap <buffer> md :call VimLLDB_BreakpointWindow_RemoveBreakpoint()<CR>')
@@ -335,14 +336,20 @@ class Context:
                 indent = '  ' * depth
                 for watch in watch_list:
                     if self.process_info['state'] == 'stopped':
-                        if watch['value'].MightHaveChildren():
-                            if watch['children']:
-                                lines.append({ 'text': f'{indent}{watch["expr"]}' })
-                                add_watch_list_lines(watch['children'], depth + 1)
+                        if watch['value'].IsValid():
+                            summary = watch['value'].GetSummary()
+                            value = watch['value'].GetValue()
+                            if watch['value'].MightHaveChildren():
+                                summary = f'  {summary}' if summary else (f'  {value}' if value else '')
+                                if watch['children']:
+                                    lines.append({ 'text': f'{indent}{watch["expr"]}{summary}' })
+                                    add_watch_list_lines(watch['children'], depth + 1)
+                                else:
+                                    lines.append({ 'text': f'{indent}{watch["expr"]}{summary}  ...' })
                             else:
-                                lines.append({ 'text': f'{indent}{watch["expr"]}  ...' })
+                                lines.append({ 'text': f'{indent}{watch["expr"]}  {value}' })
                         else:
-                            lines.append({ 'text': f'{indent}{watch["expr"]}  {watch["value"].GetValue()}' })
+                            lines.append({ 'text': f'{indent}{watch["expr"]}' })
                     else:
                         lines.append({ 'text': f'{indent}{watch["expr"]}' })
                         if watch['children']:
@@ -440,30 +447,32 @@ class Context:
         else:
             self.log_error('Invalid target selection')
 
-    # TODO: Don't allow concurrent toggling at the same time
     def toggle_debugger(self):
-        if self.selected_target:
-            if self.check_window_exists():
-                self.destory_window()
+        if not self.is_debugger_toggling:
+            self.is_debugger_toggling = True
+            if self.selected_target:
+                if self.check_window_exists():
+                    self.destory_window()
+                else:
+                    window = self.get_window()
+
+                    self.command('vnew')
+                    # NOTE: We need to update the window immediately after the window is created to avoid race condition of modifying a non-modifiable window. Why?
+                    self.create_window('breakpoint')
+                    self.update_window('breakpoint')
+
+                    self.command('new')
+                    self.create_window('watch')
+                    self.update_window('watch')
+
+                    self.command('new')
+                    self.create_window('stack')
+                    self.update_window('stack')
+
+                    self.command(f'{window} wincmd w')
             else:
-                window = self.get_window()
-
-                self.command('vnew')
-                # NOTE: We need to update the window immediately after the window is created to avoid race condition of modifying a non-modifiable window. Why?
-                self.create_window('breakpoint')
-                self.update_window('breakpoint')
-
-                self.command('new')
-                self.create_window('watch')
-                self.update_window('watch')
-
-                self.command('new')
-                self.create_window('stack')
-                self.update_window('stack')
-
-                self.command(f'{window} wincmd w')
-        else:
-            self.log_error('No target selected')
+                self.log_error('No target selected')
+            self.is_debugger_toggling = False
 
     def launch(self):
         if self.selected_target:
@@ -573,15 +582,15 @@ class Context:
 
     def update_process_cursor(self):
         cursor_list_selected = []
-        cursor_list_non_selected = []
+        cursor_list_not_selected = []
         if self.process_info['state'] == 'stopped':
             selected_frame_info = self.get_selected_frame_info()
             for frame_info in self.selected_thread_info['frames']:
                 if frame_info['type'] == 'full':
-                    cursor_list = cursor_list_selected if frame_info == selected_frame_info else cursor_list_non_selected
+                    cursor_list = cursor_list_selected if frame_info == selected_frame_info else cursor_list_not_selected
                     cursor_list.append({ 'file': frame_info['file'], 'line': frame_info['line'] })
         self.sync_signs(self.VIM_LLDB_SIGN_CURSOR_SELECTED, cursor_list_selected)
-        self.sync_signs(self.VIM_LLDB_SIGN_CURSOR_NON_SELECTED, cursor_list_non_selected)
+        self.sync_signs(self.VIM_LLDB_SIGN_CURSOR_NOT_SELECTED, cursor_list_not_selected)
 
     def toggle_breakpoint(self):
         if self.selected_target:
@@ -687,6 +696,7 @@ class Context:
         if self.process_info['state'] == 'exited':
             self.breakpoint_list.remove(breakpoint)
             self.update_window('breakpoint')
+            self.sync_signs(self.VIM_LLDB_SIGN_BREAKPOINT, self.breakpoint_list)
         else:
             if self.selected_target['handle'].BreakpointDelete(breakpoint['id']):
                 self.breakpoint_list.remove(breakpoint)
@@ -720,14 +730,14 @@ class Context:
             if re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$').match(expr):
                 value = frame.FindVariable(expr)
             else:
-                # NOTE: GetValueForVariablePath handles simple field accessor expressions (->, ., *, &, [])
+                # NOTE: GetValueForVariablePath handles simple field accessor expressions (-> . * & [])
                 value = frame.GetValueForVariablePath(expr)
                 if not value.IsValid():
                     value = frame.EvaluateExpression(expr)
         else:
-            # NOTE: We return None here instead of generating error since we want to be able to modify the watch window from exited state. This simplifies the caller
+            # NOTE: We return None here instead of raising error since we want to be able to modify the watch window from exited state. This simplifies the caller
             value = None
-        return value
+        return { 'expr': expr, 'value': value, 'children': [], 'parent': None }
 
     # NOTE: Reevaluation maintains the watch expanded/collapsed structure as long as possible
     def reevaluate_watch_list(self):
@@ -752,16 +762,17 @@ class Context:
 
         if self.process_info['state'] == 'stopped':
             for watch in self.watch_list:
-                watch['value'] = self.evaluate_expr(watch['expr'])
-                expand_children(watch, watch['children'])
+                curr_children = watch['children']
+                new_watch = self.evaluate_expr(watch['expr'])
+                list_replace(self.watch_list, watch, new_watch)
+                expand_children(new_watch, curr_children)
 
     def watch_window_add_watch(self):
         if self.process_info['state'] != 'running':
             expr = self.call('input', 'Please add watch expression:\n')
             # NOTE: Do not add watch when user cancels input or have empty input
             if expr:
-                value = self.evaluate_expr(expr)
-                watch = { 'expr': expr, 'value': value, 'children': [], 'parent': None }
+                watch = self.evaluate_expr(expr)
                 self.watch_list.append(watch)
                 self.update_window('watch')
                 # NOTE: Go to the newly added watch
@@ -777,8 +788,7 @@ class Context:
                     watch = watch['parent']
                 expr = self.call('input', 'Please change watch expression:\n')
                 if expr:
-                    value = self.evaluate_expr(expr)
-                    new_watch = { 'expr': expr, 'value': value, 'children': [], 'parent': None }
+                    new_watch = self.evaluate_expr(expr)
                     list_replace(self.watch_list, watch, new_watch)
                     self.update_window('watch')
         else:
@@ -799,7 +809,7 @@ class Context:
         if self.process_info['state'] != 'running':
             watch = self.get_watch()
             value = watch['value']
-            if not watch['children'] and value.MightHaveChildren():
+            if not watch['children'] and value and value.MightHaveChildren():
                 children = [value.GetChildAtIndex(index) for index in range(value.GetNumChildren())]
                 children = list(map(lambda v: { 'expr': v.GetName(), 'value': v, 'children': [], 'parent': watch }, children))
                 watch['children'] = children

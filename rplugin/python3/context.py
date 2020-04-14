@@ -32,6 +32,11 @@ def list_replace(list, old_value, new_value):
 # Log breakpoint attach failure (is IsValid the right function to use?)
 # Investigate wrong frame information, image lookup --verbose --address <pc>
 
+# TODO Output window
+# Stepping problem
+# scrolling
+# \r
+
 class Context:
     VIM_LLDB_WINDOW_KEY = 'vim_lldb'
     VIM_LLDB_WINDOW_LOCK = 'vim_lldb_window_lock'
@@ -43,6 +48,7 @@ class Context:
     def __init__(self, nvim):
         self.nvim = nvim
         self.tid = threading.current_thread().ident
+        self.async_lock = threading.Lock()
 
         self.sign_id = 0
         self.command(f'highlight {self.VIM_LLDB_SIGN_BREAKPOINT}_HIGHLIGHT guifg=red')
@@ -65,7 +71,8 @@ class Context:
         self.selected_frame_info_list = []
         self.breakpoint_list = []
         self.watch_list = []
-        self.process_output = { 'stdout': '', 'stderr': '', 'both': '' }
+        self.process_output = { 'both': '', 'stdout': '', 'stderr': '' }
+        self.selected_stream = 'both'
 
         self.exit_broadcaster = lldb.SBBroadcaster('exit_broadcaster')
         self.event_loop = threading.Thread(target=event_loop, args=(self,))
@@ -292,7 +299,8 @@ class Context:
             self.command('nnoremap <buffer> o :call VimLLDB_WatchWindow_ExpandWatch()<CR>')
             self.command('nnoremap <buffer> x :call VimLLDB_WatchWindow_CollapseWatch()<CR>')
         elif name == 'output':
-            pass
+            self.command('nnoremap <buffer> <C-n> :call VimLLDB_OutputWindow_NextStream()<CR>')
+            self.command('nnoremap <buffer> <C-p> :call VimLLDB_OutputWindow_PrevStream()<CR>')
 
     def destory_window(self, name = ''):
         while True:
@@ -310,8 +318,8 @@ class Context:
 
     def update_window(self, name):
         def get_output_window_lines():
-            lines = []
-            for text in self.process_output['stdout'].split('\n'):
+            lines = [ { 'text': f'process output {self.selected_stream}' }, { 'text': '' } ]
+            for text in self.process_output[self.selected_stream].split('\n'):
                 lines.append({'text': text })
             return lines
 
@@ -391,13 +399,13 @@ class Context:
             elif name == 'output':
                 lines = get_output_window_lines()
 
-            with writing(window):
-                window_matches = self.get_window_var(window, self.VIM_LLDB_WINDOW_MATCH)
-                if window_matches:
-                    for match in window_matches:
-                        self.call('matchdelete', match, window)
-                window_matches = []
+            window_matches = self.get_window_var(window, self.VIM_LLDB_WINDOW_MATCH)
+            if window_matches:
+                for match in window_matches:
+                    self.call('matchdelete', match, window)
+            window_matches = []
 
+            with writing(window):
                 # NOTE: We use deletebufline and setbufline instead of navigating to the window so that we don't see a flash of cursor change
                 buffer = self.call('winbufnr', window)
                 self.call('deletebufline', buffer, 1, '$')
@@ -410,7 +418,8 @@ class Context:
                         # TODO: Add this code when matchdelete works
                         # match_id = self.call('matchaddpos', highlight_dictionary[line['highlight']], [line_index], -1, -1, { 'window': window })
                         # window_matches.append(match_id)
-                self.set_window_var(window, self.VIM_LLDB_WINDOW_MATCH, window_matches)
+
+            self.set_window_var(window, self.VIM_LLDB_WINDOW_MATCH, window_matches)
 
     # NOTE: Lock all potential cpp files as non-modifiable when the process runs, so that we don't get into situations like breakpoint and cursor signs don't match their source code line
     def lock_files(self):
@@ -720,6 +729,20 @@ class Context:
             else:
                 self.log_error('Cannot remove breakpoint')
 
+    def output_window_next_stream(self):
+        stream_order = ['both', 'stdout', 'stderr']
+        selected_stream_index = stream_order.index(self.selected_stream)
+        selected_stream_index = (selected_stream_index + 1) % len(stream_order)
+        self.selected_stream = stream_order[selected_stream_index]
+        self.update_window('output')
+
+    def output_window_prev_stream(self):
+        stream_order = ['both', 'stdout', 'stderr']
+        selected_stream_index = stream_order.index(self.selected_stream)
+        selected_stream_index = (selected_stream_index - 1 + len(stream_order)) % len(stream_order)
+        self.selected_stream = stream_order[selected_stream_index]
+        self.update_window('output')
+
     # NOTE: Get watch in the nested structure from line number
     def get_watch(self, line = 0):
         if not line:
@@ -888,15 +911,16 @@ class Context:
             return None
 
         if self.thread_guard():
-            self.process_info = process_info
-            # NOTE: Select stopped thread and top frame (with debugging info) for each thread
-            self.selected_thread_info = stopped_thread_info
-            self.selected_frame_info_list = [get_top_frame(thread_info) for thread_info in process_info['threads']]
-            self.update_window('stack')
-            self.update_process_cursor()
-            self.reevaluate_watch_list()
-            self.update_window('watch')
-            self.goto_selected_frame()
+            with self.async_lock:
+                self.process_info = process_info
+                # NOTE: Select stopped thread and top frame (with debugging info) for each thread
+                self.selected_thread_info = stopped_thread_info
+                self.selected_frame_info_list = [get_top_frame(thread_info) for thread_info in process_info['threads']]
+                self.update_window('stack')
+                self.update_process_cursor()
+                self.reevaluate_watch_list()
+                self.update_window('watch')
+                self.goto_selected_frame()
 
     def handle_process_exited(self):
         if self.thread_guard():
@@ -920,21 +944,18 @@ class Context:
             self.selected_frame_info_list = []
             self.update_window('stack')
             self.update_process_cursor()
-            self.reevaluate_watch_list()
             self.update_window('watch')
 
     def handle_process_stdout(self, output):
         if self.thread_guard():
-            string = output.decode()
-            self.process_output['stdout'] += string
-            self.process_output['both'] += string
+            self.process_output['both'] += output
+            self.process_output['stdout'] += output
             self.update_window('output')
 
     def handle_process_stderr(self, output):
         if self.thread_guard():
-            string = output.decode()
-            self.process_output['stderr'] += string
-            self.process_output['both'] += string
+            self.process_output['both'] += output
+            self.process_output['stderr'] += output
             self.update_window('output')
 
 def event_loop(context):
@@ -988,6 +1009,14 @@ def event_loop(context):
                 stopped_thread_info = thread_info
         return process_info, stopped_thread_info
 
+    def read_output(stream):
+        output = ''
+        output_chunk = stream(4096)
+        while output_chunk:
+            output += output_chunk
+            output_chunk = stream(4096)
+        return output
+
     try:
         listener = context.debugger.GetListener()
         listener.StartListeningForEvents(context.exit_broadcaster, 0xffffffff)
@@ -1005,10 +1034,10 @@ def event_loop(context):
                             context.handle_process_exited()
                         elif state == lldb.eStateRunning:
                             context.handle_process_running()
-                    elif event_type == lldb.eBroadcastBitSTDOUT:
-                        context.handle_process_stdout(process.GetSTDOUT())
-                    elif event_type == lldb.eBroadcastBitSTDERR:
-                        context.handle_process_stderr(process.GetSTDERR())
+                    elif event_type == lldb.SBProcess.eBroadcastBitSTDOUT:
+                        context.handle_process_stdout(read_output(process.GetSTDOUT))
+                    elif event_type == lldb.SBProcess.eBroadcastBitSTDERR:
+                        context.handle_process_stderr(read_output(process.GetSTDERR))
                 elif event.BroadcasterMatchesRef(context.exit_broadcaster):
                     break
     except Exception:

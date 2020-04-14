@@ -26,9 +26,9 @@ int f()
 
 int main(int argc, char **argv)
 {
-    int x[3] = { 1, 2, 3 };
-    int *y = x;
-    f();
-    return 0;
+    for (int i = 0; i < 10; i++)
+    {
+        printf("Hello %d\n", i);
+    }
 }
 

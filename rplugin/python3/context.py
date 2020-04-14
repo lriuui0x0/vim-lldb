@@ -65,6 +65,7 @@ class Context:
         self.selected_frame_info_list = []
         self.breakpoint_list = []
         self.watch_list = []
+        self.process_output = { 'stdout': '', 'stderr': '', 'both': '' }
 
         self.exit_broadcaster = lldb.SBBroadcaster('exit_broadcaster')
         self.event_loop = threading.Thread(target=event_loop, args=(self,))
@@ -290,6 +291,8 @@ class Context:
             self.command('nnoremap <buffer> md :call VimLLDB_WatchWindow_RemoveWatch()<CR>')
             self.command('nnoremap <buffer> o :call VimLLDB_WatchWindow_ExpandWatch()<CR>')
             self.command('nnoremap <buffer> x :call VimLLDB_WatchWindow_CollapseWatch()<CR>')
+        elif name == 'output':
+            pass
 
     def destory_window(self, name = ''):
         while True:
@@ -306,6 +309,12 @@ class Context:
                 break
 
     def update_window(self, name):
+        def get_output_window_lines():
+            lines = []
+            for text in self.process_output['stdout'].split('\n'):
+                lines.append({'text': text })
+            return lines
+
         def get_breakpoint_window_lines():
             lines = []
             for breakpoint in self.breakpoint_list:
@@ -379,6 +388,9 @@ class Context:
                 lines = get_breakpoint_window_lines()
             elif name == 'watch':
                 lines = get_watch_window_lines()
+            elif name == 'output':
+                lines = get_output_window_lines()
+
             with writing(window):
                 window_matches = self.get_window_var(window, self.VIM_LLDB_WINDOW_MATCH)
                 if window_matches:
@@ -457,6 +469,10 @@ class Context:
 
                     self.command('vnew')
                     # NOTE: We need to update the window immediately after the window is created to avoid race condition of modifying a non-modifiable window. Why?
+                    self.create_window('output')
+                    self.update_window('output')
+
+                    self.command('new')
                     self.create_window('breakpoint')
                     self.update_window('breakpoint')
 
@@ -891,6 +907,10 @@ class Context:
             self.update_process_cursor()
             self.reevaluate_watch_list()
             self.update_window('watch')
+            self.process_output['stdout'] = ''
+            self.process_output['stderr'] = ''
+            self.process_output['both'] = ''
+            self.update_window('output')
             self.unlock_files()
 
     def handle_process_running(self):
@@ -902,6 +922,20 @@ class Context:
             self.update_process_cursor()
             self.reevaluate_watch_list()
             self.update_window('watch')
+
+    def handle_process_stdout(self, output):
+        if self.thread_guard():
+            string = output.decode()
+            self.process_output['stdout'] += string
+            self.process_output['both'] += string
+            self.update_window('output')
+
+    def handle_process_stderr(self, output):
+        if self.thread_guard():
+            string = output.decode()
+            self.process_output['stderr'] += string
+            self.process_output['both'] += string
+            self.update_window('output')
 
 def event_loop(context):
     def get_process_info(process):
@@ -961,17 +995,20 @@ def event_loop(context):
             event = lldb.SBEvent()
             if listener.WaitForEvent(1, event):
                 if lldb.SBProcess.EventIsProcessEvent(event):
+                    process = lldb.SBProcess.GetProcessFromEvent(event)
                     event_type = event.GetType();
                     if event_type == lldb.SBProcess.eBroadcastBitStateChanged:
-                        process = lldb.SBProcess.GetProcessFromEvent(event)
                         state = lldb.SBProcess.GetStateFromEvent(event)
-
                         if state == lldb.eStateStopped:
                             context.handle_process_stopped(*get_process_info(process))
                         elif state == lldb.eStateExited:
                             context.handle_process_exited()
                         elif state == lldb.eStateRunning:
                             context.handle_process_running()
+                    elif event_type == lldb.eBroadcastBitSTDOUT:
+                        context.handle_process_stdout(process.GetSTDOUT())
+                    elif event_type == lldb.eBroadcastBitSTDERR:
+                        context.handle_process_stderr(process.GetSTDERR())
                 elif event.BroadcasterMatchesRef(context.exit_broadcaster):
                     break
     except Exception:

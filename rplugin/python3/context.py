@@ -684,6 +684,7 @@ class Context:
                 if selected_frame_info != frame_info:
                     list_replace(self.selected_frame_info_list, selected_frame_info, frame_info)
                     self.update_window('stack')
+                    self.update_process_cursor()
                     self.reevaluate_watch_list()
                     self.update_window('watch')
                 # NOTE: Always focus frame even selected frame is the same, since user may move away manually
@@ -695,9 +696,10 @@ class Context:
             selected_thread_index = (selected_thread_index + 1) % len(self.process_info['threads'])
             self.selected_thread_info = self.process_info['threads'][selected_thread_index]
             self.update_window('stack')
+            self.update_process_cursor()
+            self.goto_selected_frame()
             self.reevaluate_watch_list()
             self.update_window('watch')
-            self.goto_selected_frame()
 
     def stack_window_prev_thread(self):
         if self.process_info['state'] == 'stopped':
@@ -705,9 +707,10 @@ class Context:
             selected_thread_index = (selected_thread_index - 1 + len(self.process_info['threads'])) % len(self.process_info['threads'])
             self.selected_thread_info = self.process_info['threads'][selected_thread_index]
             self.update_window('stack')
+            self.update_process_cursor()
+            self.goto_selected_frame()
             self.reevaluate_watch_list()
             self.update_window('watch')
-            self.goto_selected_frame()
 
     def breakpoint_window_goto_breakpoint(self):
         breakpoint_index = self.get_line() - 1
@@ -911,16 +914,25 @@ class Context:
             return None
 
         if self.thread_guard():
-            with self.async_lock:
-                self.process_info = process_info
-                # NOTE: Select stopped thread and top frame (with debugging info) for each thread
-                self.selected_thread_info = stopped_thread_info
-                self.selected_frame_info_list = [get_top_frame(thread_info) for thread_info in process_info['threads']]
-                self.update_window('stack')
-                self.update_process_cursor()
-                self.reevaluate_watch_list()
-                self.update_window('watch')
-                self.goto_selected_frame()
+            self.log_info(f'stopped - {threading.current_thread().ident}')
+            self.process_info = process_info
+            self.log_info(f'stopped - {threading.current_thread().ident}')
+            # NOTE: Select stopped thread and top frame (with debugging info) for each thread
+            self.selected_thread_info = stopped_thread_info
+            self.log_info(f'stopped - {threading.current_thread().ident}')
+            self.selected_frame_info_list = [get_top_frame(thread_info) for thread_info in process_info['threads']]
+            self.log_info(f'stopped - {threading.current_thread().ident}')
+            self.update_window('stack')
+            self.log_info(f'stopped - {threading.current_thread().ident}')
+            self.update_process_cursor()
+            self.log_info(f'stopped - {threading.current_thread().ident}')
+            self.goto_selected_frame()
+            self.log_info(f'stopped - {threading.current_thread().ident}')
+            self.reevaluate_watch_list()
+            self.log_info(f'stopped - {threading.current_thread().ident}')
+            self.update_window('watch')
+            self.log_info(f'stopped - {threading.current_thread().ident}')
+            # self.async_lock.release()
 
     def handle_process_exited(self):
         if self.thread_guard():
@@ -936,27 +948,38 @@ class Context:
             self.process_output['both'] = ''
             self.update_window('output')
             self.unlock_files()
+            # self.async_lock.release()
 
     def handle_process_running(self):
         if self.thread_guard():
+            self.log_info(f'running - {threading.current_thread().ident}')
             self.process_info = { 'state': 'running', 'threads': [] }
+            self.log_info(f'running - {threading.current_thread().ident}')
             self.selected_thread_info = None
+            self.log_info(f'running - {threading.current_thread().ident}')
             self.selected_frame_info_list = []
+            self.log_info(f'running - {threading.current_thread().ident}')
             self.update_window('stack')
+            self.log_info(f'running - {threading.current_thread().ident}')
             self.update_process_cursor()
+            self.log_info(f'running - {threading.current_thread().ident}')
             self.update_window('watch')
+            self.log_info(f'running - {threading.current_thread().ident}')
+            # self.async_lock.release()
 
     def handle_process_stdout(self, output):
         if self.thread_guard():
             self.process_output['both'] += output
             self.process_output['stdout'] += output
             self.update_window('output')
+            # self.async_lock.release()
 
     def handle_process_stderr(self, output):
         if self.thread_guard():
             self.process_output['both'] += output
             self.process_output['stderr'] += output
             self.update_window('output')
+            # self.async_lock.release()
 
 def event_loop(context):
     def get_process_info(process):
@@ -1029,14 +1052,19 @@ def event_loop(context):
                     if event_type == lldb.SBProcess.eBroadcastBitStateChanged:
                         state = lldb.SBProcess.GetStateFromEvent(event)
                         if state == lldb.eStateStopped:
+                            # context.async_lock.acquire()
                             context.handle_process_stopped(*get_process_info(process))
                         elif state == lldb.eStateExited:
+                            # context.async_lock.acquire()
                             context.handle_process_exited()
                         elif state == lldb.eStateRunning:
+                            # context.async_lock.acquire()
                             context.handle_process_running()
                     elif event_type == lldb.SBProcess.eBroadcastBitSTDOUT:
+                        # context.async_lock.acquire()
                         context.handle_process_stdout(read_output(process.GetSTDOUT))
                     elif event_type == lldb.SBProcess.eBroadcastBitSTDERR:
+                        # context.async_lock.acquire()
                         context.handle_process_stderr(read_output(process.GetSTDERR))
                 elif event.BroadcasterMatchesRef(context.exit_broadcaster):
                     break

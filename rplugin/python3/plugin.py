@@ -94,6 +94,14 @@ class Handler(object):
     def watch_window_collapse_watch(self, args):
         self.context.watch_window_collapse_watch()
 
+    @pynvim.function('VimLLDB_OutputWindow_NextStream')
+    def output_window_next_stream(self, args):
+        self.context.output_window_next_stream()
+
+    @pynvim.function('VimLLDB_OutputWindow_PrevStream')
+    def output_window_prev_stream(self, args):
+        self.context.output_window_prev_stream()
+
     @pynvim.autocmd('BufEnter')
     def buffer_sync(self):
         # NOTE: BufEnter is called on vim startup, initialize here instead of VimEnter because VimEnter is called after all buffers are loaded
@@ -106,6 +114,9 @@ class Handler(object):
     @pynvim.autocmd('TextChangedI')
     @pynvim.autocmd('TextChangedP')
     def buffer_sync_back(self):
+        # NOTE: In some cases TextChanged can be triggered before (or concurrently?) with BufEnter, so we call startup here as well
+        self.startup()
+        # NOTE: When text changes, the sign positions may change and we need to get that information back into our in-memory object representation
         self.context.buffer_sync_back()
 
     @pynvim.autocmd('VimLeavePre')

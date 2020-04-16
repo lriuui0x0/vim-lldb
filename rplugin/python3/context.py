@@ -4,6 +4,7 @@ import threading
 import traceback
 import inspect
 from contextlib import contextmanager
+import time
 import lldb
 
 def list_replace(list, old_value, new_value):
@@ -27,9 +28,12 @@ def list_replace(list, old_value, new_value):
 # What is use_dynamic for variable inspection?
 
 # TODO
+# Stepping problem, two handler can be called in the interleaved fashion, wtf? Currently solved through async_lock, https://github.com/neovim/pynvim/issues/441
 # matchdelete in nvim https://github.com/neovim/neovim/issues/12110
+# switch to win_execute in nvim
 # Configurable debugger window layout, window key mapping
 # Log breakpoint attach failure (is IsValid the right function to use?)
+# scrolling output window, can be solved by win_execute
 # Investigate wrong frame information, image lookup --verbose --address <pc>
 
 class Context:
@@ -43,6 +47,7 @@ class Context:
     def __init__(self, nvim):
         self.nvim = nvim
         self.tid = threading.current_thread().ident
+        self.async_lock = threading.Lock()
 
         self.sign_id = 0
         self.command(f'highlight {self.VIM_LLDB_SIGN_BREAKPOINT}_HIGHLIGHT guifg=red')
@@ -65,6 +70,8 @@ class Context:
         self.selected_frame_info_list = []
         self.breakpoint_list = []
         self.watch_list = []
+        self.process_output = { 'both': '', 'stdout': '', 'stderr': '' }
+        self.selected_stream = 'both'
 
         self.exit_broadcaster = lldb.SBBroadcaster('exit_broadcaster')
         self.event_loop = threading.Thread(target=event_loop, args=(self,))
@@ -290,6 +297,9 @@ class Context:
             self.command('nnoremap <buffer> md :call VimLLDB_WatchWindow_RemoveWatch()<CR>')
             self.command('nnoremap <buffer> o :call VimLLDB_WatchWindow_ExpandWatch()<CR>')
             self.command('nnoremap <buffer> x :call VimLLDB_WatchWindow_CollapseWatch()<CR>')
+        elif name == 'output':
+            self.command('nnoremap <buffer> <C-n> :call VimLLDB_OutputWindow_NextStream()<CR>')
+            self.command('nnoremap <buffer> <C-p> :call VimLLDB_OutputWindow_PrevStream()<CR>')
 
     def destory_window(self, name = ''):
         while True:
@@ -306,6 +316,12 @@ class Context:
                 break
 
     def update_window(self, name):
+        def get_output_window_lines():
+            lines = [ { 'text': f'process output {self.selected_stream}' }, { 'text': '' } ]
+            for text in self.process_output[self.selected_stream].splitlines():
+                lines.append({'text': text })
+            return lines
+
         def get_breakpoint_window_lines():
             lines = []
             for breakpoint in self.breakpoint_list:
@@ -379,13 +395,16 @@ class Context:
                 lines = get_breakpoint_window_lines()
             elif name == 'watch':
                 lines = get_watch_window_lines()
-            with writing(window):
-                window_matches = self.get_window_var(window, self.VIM_LLDB_WINDOW_MATCH)
-                if window_matches:
-                    for match in window_matches:
-                        self.call('matchdelete', match, window)
-                window_matches = []
+            elif name == 'output':
+                lines = get_output_window_lines()
 
+            window_matches = self.get_window_var(window, self.VIM_LLDB_WINDOW_MATCH)
+            if window_matches:
+                for match in window_matches:
+                    self.call('matchdelete', match, window)
+            window_matches = []
+
+            with writing(window):
                 # NOTE: We use deletebufline and setbufline instead of navigating to the window so that we don't see a flash of cursor change
                 buffer = self.call('winbufnr', window)
                 self.call('deletebufline', buffer, 1, '$')
@@ -398,7 +417,8 @@ class Context:
                         # TODO: Add this code when matchdelete works
                         # match_id = self.call('matchaddpos', highlight_dictionary[line['highlight']], [line_index], -1, -1, { 'window': window })
                         # window_matches.append(match_id)
-                self.set_window_var(window, self.VIM_LLDB_WINDOW_MATCH, window_matches)
+
+            self.set_window_var(window, self.VIM_LLDB_WINDOW_MATCH, window_matches)
 
     # NOTE: Lock all potential cpp files as non-modifiable when the process runs, so that we don't get into situations like breakpoint and cursor signs don't match their source code line
     def lock_files(self):
@@ -457,6 +477,10 @@ class Context:
 
                     self.command('vnew')
                     # NOTE: We need to update the window immediately after the window is created to avoid race condition of modifying a non-modifiable window. Why?
+                    self.create_window('output')
+                    self.update_window('output')
+
+                    self.command('new')
                     self.create_window('breakpoint')
                     self.update_window('breakpoint')
 
@@ -659,6 +683,7 @@ class Context:
                 if selected_frame_info != frame_info:
                     list_replace(self.selected_frame_info_list, selected_frame_info, frame_info)
                     self.update_window('stack')
+                    self.update_process_cursor()
                     self.reevaluate_watch_list()
                     self.update_window('watch')
                 # NOTE: Always focus frame even selected frame is the same, since user may move away manually
@@ -670,9 +695,10 @@ class Context:
             selected_thread_index = (selected_thread_index + 1) % len(self.process_info['threads'])
             self.selected_thread_info = self.process_info['threads'][selected_thread_index]
             self.update_window('stack')
+            self.update_process_cursor()
+            self.goto_selected_frame()
             self.reevaluate_watch_list()
             self.update_window('watch')
-            self.goto_selected_frame()
 
     def stack_window_prev_thread(self):
         if self.process_info['state'] == 'stopped':
@@ -680,9 +706,10 @@ class Context:
             selected_thread_index = (selected_thread_index - 1 + len(self.process_info['threads'])) % len(self.process_info['threads'])
             self.selected_thread_info = self.process_info['threads'][selected_thread_index]
             self.update_window('stack')
+            self.update_process_cursor()
+            self.goto_selected_frame()
             self.reevaluate_watch_list()
             self.update_window('watch')
-            self.goto_selected_frame()
 
     def breakpoint_window_goto_breakpoint(self):
         breakpoint_index = self.get_line() - 1
@@ -703,6 +730,20 @@ class Context:
                 self.sync_signs(self.VIM_LLDB_SIGN_BREAKPOINT, self.breakpoint_list)
             else:
                 self.log_error('Cannot remove breakpoint')
+
+    def output_window_next_stream(self):
+        stream_order = ['both', 'stdout', 'stderr']
+        selected_stream_index = stream_order.index(self.selected_stream)
+        selected_stream_index = (selected_stream_index + 1) % len(stream_order)
+        self.selected_stream = stream_order[selected_stream_index]
+        self.update_window('output')
+
+    def output_window_prev_stream(self):
+        stream_order = ['both', 'stdout', 'stderr']
+        selected_stream_index = stream_order.index(self.selected_stream)
+        selected_stream_index = (selected_stream_index - 1 + len(stream_order)) % len(stream_order)
+        self.selected_stream = stream_order[selected_stream_index]
+        self.update_window('output')
 
     # NOTE: Get watch in the nested structure from line number
     def get_watch(self, line = 0):
@@ -878,9 +919,10 @@ class Context:
             self.selected_frame_info_list = [get_top_frame(thread_info) for thread_info in process_info['threads']]
             self.update_window('stack')
             self.update_process_cursor()
+            self.goto_selected_frame()
             self.reevaluate_watch_list()
             self.update_window('watch')
-            self.goto_selected_frame()
+            self.async_lock.release()
 
     def handle_process_exited(self):
         if self.thread_guard():
@@ -891,7 +933,12 @@ class Context:
             self.update_process_cursor()
             self.reevaluate_watch_list()
             self.update_window('watch')
+            self.process_output['stdout'] = ''
+            self.process_output['stderr'] = ''
+            self.process_output['both'] = ''
+            self.update_window('output')
             self.unlock_files()
+            self.async_lock.release()
 
     def handle_process_running(self):
         if self.thread_guard():
@@ -900,8 +947,22 @@ class Context:
             self.selected_frame_info_list = []
             self.update_window('stack')
             self.update_process_cursor()
-            self.reevaluate_watch_list()
             self.update_window('watch')
+            self.async_lock.release()
+
+    def handle_process_stdout(self, output):
+        if self.thread_guard():
+            self.process_output['both'] += output
+            self.process_output['stdout'] += output
+            self.update_window('output')
+            self.async_lock.release()
+
+    def handle_process_stderr(self, output):
+        if self.thread_guard():
+            self.process_output['both'] += output
+            self.process_output['stderr'] += output
+            self.update_window('output')
+            self.async_lock.release()
 
 def event_loop(context):
     def get_process_info(process):
@@ -954,6 +1015,14 @@ def event_loop(context):
                 stopped_thread_info = thread_info
         return process_info, stopped_thread_info
 
+    def read_output(stream):
+        output = ''
+        output_chunk = stream(4096)
+        while output_chunk:
+            output += output_chunk
+            output_chunk = stream(4096)
+        return output
+
     try:
         listener = context.debugger.GetListener()
         listener.StartListeningForEvents(context.exit_broadcaster, 0xffffffff)
@@ -961,17 +1030,25 @@ def event_loop(context):
             event = lldb.SBEvent()
             if listener.WaitForEvent(1, event):
                 if lldb.SBProcess.EventIsProcessEvent(event):
+                    process = lldb.SBProcess.GetProcessFromEvent(event)
                     event_type = event.GetType();
                     if event_type == lldb.SBProcess.eBroadcastBitStateChanged:
-                        process = lldb.SBProcess.GetProcessFromEvent(event)
                         state = lldb.SBProcess.GetStateFromEvent(event)
-
                         if state == lldb.eStateStopped:
+                            context.async_lock.acquire()
                             context.handle_process_stopped(*get_process_info(process))
                         elif state == lldb.eStateExited:
+                            context.async_lock.acquire()
                             context.handle_process_exited()
                         elif state == lldb.eStateRunning:
+                            context.async_lock.acquire()
                             context.handle_process_running()
+                    elif event_type == lldb.SBProcess.eBroadcastBitSTDOUT:
+                        context.async_lock.acquire()
+                        context.handle_process_stdout(read_output(process.GetSTDOUT))
+                    elif event_type == lldb.SBProcess.eBroadcastBitSTDERR:
+                        context.async_lock.acquire()
+                        context.handle_process_stderr(read_output(process.GetSTDERR))
                 elif event.BroadcasterMatchesRef(context.exit_broadcaster):
                     break
     except Exception:

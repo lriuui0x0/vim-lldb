@@ -6,6 +6,7 @@ This is a LLDB debugger plugin for Neovim. It's currently in a very early stage,
 
 - Target selection
 - Launch / step over / step in / step out / pause / resume / kill
+- Output window
 - Breakpoint toggle / window
 - Multi-thread stack window
 - Watch window
@@ -44,7 +45,7 @@ Below is the list of functions available:
 
 - `VimLLDB_ToggleDebugger()`
 
-    Toggle the debugger view, which includes a stack window, watch window, and a breakpoint window. The windows and layout aren't configurable at the moment.
+    Toggle the debugger view, which includes a stack window, watch window, a breakpoint window, and a output window. The windows and layout aren't configurable at the moment.
 
 - `VimLLDB_Launch()`
 
@@ -119,4 +120,9 @@ Within each debugger window, there're key mappings (currently non-configurable) 
     - `o` Expand watch value.
 
     - `x` Collapse watch value.
+
+- Output window
+    - `<C-n>` See next output stream.
+
+    - `<C-p>` See previous output stream.
 

@@ -527,6 +527,10 @@ class Context:
                 process = self.selected_target['handle'].Launch(launch_info, error)
                 if error.Success():
                     self.lock_files()
+                    self.process_output['both'] = ''
+                    self.process_output['stdout'] = ''
+                    self.process_output['stderr'] = ''
+                    self.update_window('output')
                 else:
                     self.log_error(error.GetCString())
             else:
@@ -933,10 +937,6 @@ class Context:
             self.update_process_cursor()
             self.reevaluate_watch_list()
             self.update_window('watch')
-            self.process_output['stdout'] = ''
-            self.process_output['stderr'] = ''
-            self.process_output['both'] = ''
-            self.update_window('output')
             self.unlock_files()
             self.async_lock.release()
 

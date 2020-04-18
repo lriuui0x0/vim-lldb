@@ -782,7 +782,7 @@ class Context:
                 else:
                     # NOTE: GetValueForVariablePath handles simple field accessor expressions (-> . * & [])
                     watch['value'] = frame.GetValueForVariablePath(expr)
-                    if not value.IsValid():
+                    if not watch['value'].IsValid():
                         watch['value'] = frame.EvaluateExpression(expr)
 
                 if len(expr_list) > 1:

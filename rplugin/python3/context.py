@@ -829,7 +829,7 @@ class Context:
                 watch = self.get_watch()
                 while watch['parent']:
                     watch = watch['parent']
-                expr = self.call('input', 'Please change watch expression:\n')
+                expr = self.call('input', 'Please change watch expression:\n', watch['expr'])
                 if expr:
                     new_watch = self.evaluate_expr(expr)
                     list_replace(self.watch_list, watch, new_watch)
